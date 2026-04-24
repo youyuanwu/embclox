@@ -1,0 +1,11 @@
+{
+  "name": "e1000-driver",
+  "description": "E1000 driver in Rust for the Intel 82540EP/EM Gigabit Ethernet.",
+  "authors": [{
+    "name": "Luoyuan Xiao",
+    "email": "xiaoluoyuan@163.com"
+  }],
+  "keywords": ["ethernet", "e1000", "linux", "driver"],
+  "repo": "elliott10/e1000-driver",
+  "doc_url": "https://github.com/elliott10/e1000-driver/blob/dev/README.md"
+}

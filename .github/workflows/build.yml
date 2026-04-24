@@ -1,0 +1,30 @@
+name: Build CI
+
+on: [push, pull_request]
+
+jobs:
+
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        arch: [riscv64]
+        rust-toolchain: [nightly, nightly-2023-02-23]
+    steps:
+    - uses: actions/checkout@v3
+    - uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: ${{ matrix.rust-toolchain }}
+        override: true
+        target: riscv64gc-unknown-none-elf
+        components: rust-src
+
+    - uses: ./.github/workflows/actions/setup-musl
+      with:
+        arch: ${{ matrix.arch }}
+    - name: Build ${{ github.repository }}
+      run: |
+        cargo build -vv --target riscv64gc-unknown-none-elf
