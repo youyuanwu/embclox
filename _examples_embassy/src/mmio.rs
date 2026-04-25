@@ -31,9 +31,8 @@ pub fn map_mmio(phys_offset: u64, kernel_offset: u64, phys_base: u64, size: u64)
         .0
         .start_address()
         .as_u64();
-    let l4_table = unsafe {
-        &mut *(( cr3_phys + phys_offset) as *mut x86_64::structures::paging::PageTable)
-    };
+    let l4_table =
+        unsafe { &mut *((cr3_phys + phys_offset) as *mut x86_64::structures::paging::PageTable) };
     let mut mapper = unsafe { OffsetPageTable::new(l4_table, VirtAddr::new(phys_offset)) };
     let mut allocator = HeapFrameAllocator { kernel_offset };
 
@@ -41,9 +40,7 @@ pub fn map_mmio(phys_offset: u64, kernel_offset: u64, phys_base: u64, size: u64)
     let virt_base = 0x4000_0000_0000u64; // 64 TiB — unused region
     let num_pages = size.div_ceil(0x1000);
 
-    let flags = PageTableFlags::PRESENT
-        | PageTableFlags::WRITABLE
-        | PageTableFlags::NO_CACHE;
+    let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_CACHE;
 
     for i in 0..num_pages {
         let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt_base + i * 0x1000));

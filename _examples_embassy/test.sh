@@ -26,7 +26,7 @@ else
     make image
 fi
 
-IMAGE="target/x86_64-unknown-none/${MODE}/e1000-embassy-example.img"
+IMAGE="../target/x86_64-unknown-none/${MODE}/e1000-embassy-example.img"
 
 if [[ ! -f "$IMAGE" ]]; then
     echo "ERROR: disk image not found at $IMAGE"

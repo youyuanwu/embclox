@@ -1,7 +1,7 @@
-use uart_16550::SerialPort;
-use spin::Mutex;
 use core::fmt;
 use core::fmt::Write;
+use spin::Mutex;
+use uart_16550::SerialPort;
 
 static SERIAL1: Mutex<Option<SerialPort>> = Mutex::new(None);
 

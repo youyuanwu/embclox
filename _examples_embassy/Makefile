@@ -1,7 +1,8 @@
 arch ?= x86_64
 target := $(arch)-unknown-none
 mode := debug
-kernel := target/$(target)/$(mode)/e1000-embassy-example
+target_dir := ../target
+kernel := $(target_dir)/$(target)/$(mode)/e1000-embassy-example
 image := $(kernel).img
 
 BUILD_ARGS =
@@ -15,12 +16,11 @@ build:
 	cargo build $(BUILD_ARGS)
 
 image: build
-	cd .. && RUSTC_BOOTSTRAP=1 cargo run -p mkimage -- \
+	cd .. && cargo run -p mkimage -- \
 		_examples_embassy/$(kernel) _examples_embassy/$(image)
 
 clean:
-	cargo clean
-	cd tools/mkimage && cargo clean
+	cd .. && cargo clean
 
 qemu: image
 	qemu-system-x86_64 \

@@ -1,4 +1,4 @@
-use alloc::alloc::{alloc_zeroed, dealloc, Layout};
+use alloc::alloc::{Layout, alloc_zeroed, dealloc};
 use log::*;
 
 /// KernelFunc implementation for x86_64 with bootloader offset-mapped memory.

@@ -29,14 +29,21 @@ impl E1000Embassy {
         unsafe { &*self.device.get() }
     }
 
+    #[allow(clippy::mut_from_ref)]
     fn dev_mut(&self) -> &mut E1000Dev {
         unsafe { &mut *self.device.get() }
     }
 }
 
 impl embassy_net_driver::Driver for E1000Embassy {
-    type RxToken<'a> = RxToken<'a> where Self: 'a;
-    type TxToken<'a> = TxToken<'a> where Self: 'a;
+    type RxToken<'a>
+        = RxToken<'a>
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = TxToken<'a>
+    where
+        Self: 'a;
 
     fn receive(&mut self, cx: &mut Context) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         if self.dev().has_rx_packet() && self.dev().has_tx_space() {

@@ -77,7 +77,10 @@ pub fn pci_find_e1000() -> Option<E1000PciInfo> {
             let cmd = pci_read16(0, dev, 0, PCI_COMMAND);
             pci_write16(0, dev, 0, PCI_COMMAND, cmd | 0x07);
             let cmd_readback = pci_read16(0, dev, 0, PCI_COMMAND);
-            info!("PCI: command register: {:#06x} -> {:#06x}", cmd, cmd_readback);
+            info!(
+                "PCI: command register: {:#06x} -> {:#06x}",
+                cmd, cmd_readback
+            );
 
             // Read BAR0 (memory-mapped registers)
             let bar0_raw = pci_read32(0, dev, 0, PCI_BAR0);

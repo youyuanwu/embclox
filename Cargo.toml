@@ -4,4 +4,10 @@ resolver = "2"
 members = [
     "external/e1000",
     "tools/mkimage",
+    "_examples_embassy",
+]
+
+default-members = [
+    "external/e1000",
+    "tools/mkimage",
 ]

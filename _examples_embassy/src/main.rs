@@ -13,7 +13,7 @@ mod pci_init;
 mod serial;
 mod time_driver;
 
-use bootloader_api::{config::Mapping, entry_point, BootInfo, BootloaderConfig};
+use bootloader_api::{BootInfo, BootloaderConfig, config::Mapping, entry_point};
 use core::panic::PanicInfo;
 use e1000_adapter::E1000Embassy;
 use embassy_executor::Executor;
@@ -51,7 +51,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let kernel_virt_to_phys: u64 = 0xFFFF000000;
 
     // Map e1000 BAR0 MMIO with Uncacheable 4KB pages (required for device register access)
-    let e1000_vaddr = mmio::map_mmio(phys_offset, kernel_virt_to_phys, pci_info.bar0_phys, 0x20000);
+    let e1000_vaddr = mmio::map_mmio(
+        phys_offset,
+        kernel_virt_to_phys,
+        pci_info.bar0_phys,
+        0x20000,
+    );
     info!("e1000 MMIO vaddr: {:#x}", e1000_vaddr);
 
     // Initialize e1000 driver
@@ -59,8 +64,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         kernel_offset: kernel_virt_to_phys,
         phys_offset,
     };
-    let mut e1000_device =
-        e1000_driver::e1000::E1000Device::<Kernfn>::new(kfn, e1000_vaddr).expect("e1000 init failed");
+    let mut e1000_device = e1000_driver::e1000::E1000Device::<Kernfn>::new(kfn, e1000_vaddr)
+        .expect("e1000 init failed");
     info!("e1000 driver initialized");
 
     // Re-enable PCI bus mastering AFTER device reset (reset clears the command register)
@@ -71,20 +76,27 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         let regs_ptr = e1000_vaddr as *const u32;
         let ral = core::ptr::read_volatile(regs_ptr.add(0x5400 / 4));
         let rah = core::ptr::read_volatile(regs_ptr.add(0x5404 / 4));
-        [ral as u8, (ral >> 8) as u8, (ral >> 16) as u8, (ral >> 24) as u8,
-         rah as u8, (rah >> 8) as u8]
+        [
+            ral as u8,
+            (ral >> 8) as u8,
+            (ral >> 16) as u8,
+            (ral >> 24) as u8,
+            rah as u8,
+            (rah >> 8) as u8,
+        ]
     };
-    info!("MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    info!(
+        "MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    );
 
     // Send a gratuitous ARP to trigger QEMU's e1000 model to re-evaluate RX readiness.
     // After device reset + re-init, QEMU's slirp may have cached rx_can_recv=false.
     // A TX triggers qemu_flush_queued_packets() which re-polls rx_can_recv.
     let arp: [u8; 42] = [
-        0xff,0xff,0xff,0xff,0xff,0xff, mac[0],mac[1],mac[2],mac[3],mac[4],mac[5],
-        0x08,0x06, 0x00,0x01, 0x08,0x00, 0x06, 0x04, 0x00,0x01,
-        mac[0],mac[1],mac[2],mac[3],mac[4],mac[5], 10,0,2,15,
-        0,0,0,0,0,0, 10,0,2,2,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], 0x08,
+        0x06, 0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01, mac[0], mac[1], mac[2], mac[3],
+        mac[4], mac[5], 10, 0, 2, 15, 0, 0, 0, 0, 0, 0, 10, 0, 2, 2,
     ];
     e1000_device.e1000_transmit(&arp);
     info!("Sent gratuitous ARP");
@@ -117,7 +129,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 #[embassy_executor::task]
 async fn net_task(mut runner: embassy_net::Runner<'static, E1000Embassy>) {
     info!("net_task: starting runner.run()");
-    info!("embassy time now: {}", embassy_time::Instant::now().as_micros());
+    info!(
+        "embassy time now: {}",
+        embassy_time::Instant::now().as_micros()
+    );
     runner.run().await;
 }
 
@@ -133,7 +148,8 @@ async fn echo_task(stack: &'static Stack<'static>) {
     let mut read_buf = [0u8; 1024];
 
     loop {
-        let mut socket = embassy_net::tcp::TcpSocket::new(*stack, &mut socket_rx_buf, &mut socket_tx_buf);
+        let mut socket =
+            embassy_net::tcp::TcpSocket::new(*stack, &mut socket_rx_buf, &mut socket_tx_buf);
         info!("Waiting for TCP connection on port 1234...");
         if let Err(e) = socket.accept(1234).await {
             warn!("Accept error: {:?}", e);
