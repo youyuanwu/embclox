@@ -208,7 +208,6 @@ name = "e1000-embassy-example"
 version = "0.1.0"
 dependencies = [
  "bootloader_api",
- "critical-section",
  "e1000",
  "embassy-executor",
  "embassy-futures",
@@ -216,13 +215,11 @@ dependencies = [
  "embassy-net-driver",
  "embassy-sync",
  "embassy-time",
- "embassy-time-driver",
  "embedded-io-async",
- "linked_list_allocator",
+ "hal-x86",
  "log",
  "spin",
  "static_cell",
- "uart_16550",
  "x86_64",
 ]
 
@@ -492,6 +489,20 @@ dependencies = [
  "crc",
  "log",
  "uuid",
+]
+
+[[package]]
+name = "hal-x86"
+version = "0.1.0"
+dependencies = [
+ "bootloader_api",
+ "critical-section",
+ "embassy-time-driver",
+ "linked_list_allocator",
+ "log",
+ "spin",
+ "uart_16550",
+ "x86_64",
 ]
 
 [[package]]

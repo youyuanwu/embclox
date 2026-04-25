@@ -2,17 +2,11 @@
 #![no_main]
 
 extern crate alloc;
+extern crate hal_x86; // pulls in critical_section, time_driver, heap, serial/logger
 
-mod critical_section_impl;
 mod dma_alloc;
 mod e1000_adapter;
-mod heap;
-mod logger;
-mod mmio;
 mod mmio_regs;
-mod pci_init;
-mod serial;
-mod time_driver;
 
 use bootloader_api::{BootInfo, BootloaderConfig, config::Mapping, entry_point};
 use core::panic::PanicInfo;
@@ -34,43 +28,30 @@ const BOOTLOADER_CONFIG: BootloaderConfig = {
 entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
-    serial::init();
+    let mut p = hal_x86::init(boot_info, hal_x86::Config::default());
     info!("Booting e1000-embassy example...");
 
-    let phys_offset = boot_info
-        .physical_memory_offset
-        .into_option()
-        .expect("physical_memory_offset not available");
-
-    heap::init(boot_info);
-    info!("Heap initialized");
-    info!("Physical memory offset: {:#x}", phys_offset);
-
     // PCI scan for e1000
-    let pci_info = pci_init::pci_find_e1000().expect("e1000 device not found on PCI bus");
+    let pci_dev = p
+        .pci
+        .find_device_any(0x8086, &[0x100E, 0x100F, 0x10D3])
+        .expect("e1000 device not found on PCI bus");
+    let bar0_phys = p.pci.read_bar(&pci_dev, 0);
 
-    // Kernel virtual-to-physical offset (bootloader virtual_address_offset - kernel_load_phys)
-    let kernel_virt_to_phys: u64 = 0xFFFF000000;
-
-    // Map e1000 BAR0 MMIO with Uncacheable 4KB pages (required for device register access)
-    let e1000_vaddr = mmio::map_mmio(
-        phys_offset,
-        kernel_virt_to_phys,
-        pci_info.bar0_phys,
-        0x20000,
-    );
+    // Map e1000 BAR0 MMIO with Uncacheable pages
+    let e1000_vaddr = p.memory.map_mmio(bar0_phys, 0x20000);
     info!("e1000 MMIO vaddr: {:#x}", e1000_vaddr);
 
     let regs = MmioRegs::new(e1000_vaddr);
 
     // Caller performs device reset before new() per driver contract
     e1000_reset(&regs);
-    pci_init::pci_enable_bus_mastering(pci_info.dev);
+    p.pci.enable_bus_mastering(&pci_dev);
 
-    // Initialize e1000 driver (post-reset init: rings, TCTL, RCTL)
+    // Initialize e1000 driver
     let dma = BootDmaAllocator {
-        kernel_offset: kernel_virt_to_phys,
-        phys_offset,
+        kernel_offset: p.memory.kernel_offset(),
+        phys_offset: p.memory.phys_offset(),
     };
     let mut e1000_device = e1000::E1000Device::new(regs, dma);
     info!("e1000 driver initialized");
@@ -81,7 +62,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     );
 
-    // Send a gratuitous ARP to trigger QEMU slirp to re-evaluate RX readiness.
+    // Gratuitous ARP — QEMU slirp workaround
     let arp: [u8; 42] = [
         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], 0x08,
         0x06, 0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01, mac[0], mac[1], mac[2], mac[3],
@@ -109,7 +90,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     static STACK: StaticCell<Stack> = StaticCell::new();
     let stack = &*STACK.init(stack);
 
-    // Start executor
     static EXECUTOR: StaticCell<Executor> = StaticCell::new();
     let executor = EXECUTOR.init(Executor::new());
     info!("Starting Embassy executor...");
@@ -119,16 +99,14 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     });
 }
 
-/// Perform e1000 device reset (caller responsibility per driver contract).
 fn e1000_reset(regs: &MmioRegs) {
     use e1000::RegisterAccess;
     use e1000::regs::*;
 
-    regs.write_reg(IMS, 0); // disable interrupts
+    regs.write_reg(IMS, 0);
     let ctl = regs.read_reg(CTL);
     regs.write_reg(CTL, ctl | CTL_RST);
 
-    // Wait for reset to complete (Intel 82540 spec: ≤ 1ms)
     let mut timeout = 100_000u32;
     loop {
         if regs.read_reg(CTL) & CTL_RST == 0 {
@@ -138,7 +116,7 @@ fn e1000_reset(regs: &MmioRegs) {
         assert!(timeout > 0, "e1000 reset timeout");
     }
 
-    regs.write_reg(IMS, 0); // re-disable interrupts
+    regs.write_reg(IMS, 0);
     regs.write_reg(CTL, CTL_SLU | CTL_ASDE);
     regs.write_reg(FCAL, 0);
     regs.write_reg(FCAH, 0);

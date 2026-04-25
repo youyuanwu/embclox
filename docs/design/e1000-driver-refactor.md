@@ -7,8 +7,9 @@ The `crates/e1000` crate is a clean e1000 NIC driver extracted from the
 It provides trait-based abstractions for register access and DMA, a
 `split()` API for concurrent RX/TX use, and zero-copy packet I/O.
 
-`no_std`, no `alloc` dependency. The original `external/e1000` is
-retained as reference but removed from the workspace.
+`no_std`, no `alloc` dependency. Extracted from the
+[elliott10/e1000-driver](https://github.com/elliott10/e1000-driver) fork
+(original removed from repo).
 
 ## Traits
 
@@ -106,4 +107,3 @@ crates/e1000/
 
 - [Intel 82540 SDM](https://pdos.csail.mit.edu/6.828/2019/readings/hardware/8254x_GBe_SDM.pdf)
 - [Redox OS e1000d](https://github.com/redox-os/drivers/blob/master/net/e1000d/src/device.rs)
-- [original fork](external/e1000/) (retained as reference)

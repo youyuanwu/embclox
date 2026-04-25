@@ -5,11 +5,13 @@ members = [
     "tools/mkimage",
     "_examples_embassy",
     "crates/e1000",
+    "crates/hal-x86",
 ]
 
 default-members = [
     "tools/mkimage",
     "crates/e1000",
+    "crates/hal-x86",
 ]
 
 [workspace.dependencies]
@@ -25,6 +27,7 @@ embedded-io-async = "0.7"
 
 # Drivers & platform
 e1000 = { path = "crates/e1000" }
+hal-x86 = { path = "crates/hal-x86" }
 bootloader = "0.11"
 bootloader_api = "0.11"
 x86_64 = "0.15"
