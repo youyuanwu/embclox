@@ -131,7 +131,7 @@ impl MemoryMapper {
     }
 }
 
-fn page_table_mapper(phys_offset: u64) -> OffsetPageTable<'static> {
+pub(crate) fn page_table_mapper(phys_offset: u64) -> OffsetPageTable<'static> {
     let cr3_phys = x86_64::registers::control::Cr3::read()
         .0
         .start_address()

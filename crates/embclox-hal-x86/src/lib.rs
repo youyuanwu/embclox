@@ -17,6 +17,8 @@ pub mod time;
 
 use bootloader_api::BootInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
+use x86_64::structures::paging::Translate;
+use x86_64::VirtAddr;
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
@@ -62,13 +64,22 @@ pub fn init(boot_info: &'static mut BootInfo, config: Config) -> Peripherals {
         .into_option()
         .expect("physical_memory_offset not available");
 
-    // kernel_offset: the difference between kernel virtual addresses and
-    // physical addresses. For bootloader v0.11, this is the
-    // virtual_address_offset shown in the boot log.
-    // Note: boot_info.kernel_image_offset is a different value (the offset
-    // within the kernel image, not the virtual-to-physical offset).
-    // TODO: compute dynamically instead of hardcoding.
-    let kernel_offset: u64 = 0xFFFF000000;
+    // Compute kernel_offset dynamically by probing the page tables.
+    // kernel_offset is the linear shift between kernel virtual addresses and
+    // physical addresses (i.e. kernel_vaddr - paddr). It is constant for all
+    // kernel-mapped memory, so we only need to probe once with any known
+    // kernel address. We use the same OffsetPageTable that MemoryMapper wraps
+    // internally, but after bootstrap we store the offset as a plain u64 for
+    // cheap arithmetic instead of repeating page-table walks.
+    let kernel_offset: u64 = {
+        let mapper = memory::page_table_mapper(phys_offset);
+        let probe_vaddr = VirtAddr::new(&INITIALIZED as *const _ as u64);
+        // Walk the page tables to resolve the physical address of the probe.
+        let probe_paddr = mapper
+            .translate_addr(probe_vaddr)
+            .expect("failed to translate probe address for kernel_offset");
+        probe_vaddr.as_u64() - probe_paddr.as_u64()
+    };
 
     log::info!("Physical memory offset: {:#x}", phys_offset);
     log::info!("Kernel offset: {:#x}", kernel_offset);
