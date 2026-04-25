@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    name: Build, Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read Rust version
+        id: rust-version
+        run: echo "channel=$(grep 'channel' rust-toolchain.toml | sed 's/.*= *\"\(.*\)\"/\1/')" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ steps.rust-version.outputs.channel }}
+          targets: x86_64-unknown-none
+          components: clippy, rustfmt, llvm-tools-preview, rust-src
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy workspace
+        run: cargo clippy -- -D warnings
+
+      - name: Clippy example
+        working-directory: _examples_embassy
+        run: cargo clippy -- -D warnings
+
+      - name: Build disk image
+        working-directory: _examples_embassy
+        run: make image
+
+      - name: Install QEMU
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 netcat-openbsd
+
+      - name: QEMU integration test
+        working-directory: _examples_embassy
+        run: bash test.sh
