@@ -2,15 +2,15 @@ use core::cell::UnsafeCell;
 use core::task::Context;
 use embassy_net_driver::{Capabilities, HardwareAddress, LinkState};
 
-use crate::kernfn::Kernfn;
+use crate::dma_alloc::BootDmaAllocator;
+use crate::mmio_regs::MmioRegs;
 
-type E1000Dev = e1000_driver::e1000::E1000Device<'static, Kernfn>;
+type Dev = e1000::E1000Device<MmioRegs, BootDmaAllocator>;
 
 pub struct E1000Embassy {
-    // UnsafeCell because Driver::receive() must hand out both RxToken
-    // and TxToken, each needing &mut access. This is safe because smoltcp
-    // consumes RxToken before TxToken (sequential, not concurrent).
-    device: UnsafeCell<E1000Dev>,
+    // UnsafeCell needed because Driver::receive() returns both RxToken
+    // and TxToken from &mut self. Safe: smoltcp consumes sequentially.
+    device: UnsafeCell<Dev>,
     mac: [u8; 6],
 }
 
@@ -18,19 +18,15 @@ pub struct E1000Embassy {
 unsafe impl Send for E1000Embassy {}
 
 impl E1000Embassy {
-    pub fn new(device: E1000Dev, mac: [u8; 6]) -> Self {
+    pub fn new(device: Dev, mac: [u8; 6]) -> Self {
         Self {
             device: UnsafeCell::new(device),
             mac,
         }
     }
 
-    fn dev(&self) -> &E1000Dev {
-        unsafe { &*self.device.get() }
-    }
-
     #[allow(clippy::mut_from_ref)]
-    fn dev_mut(&self) -> &mut E1000Dev {
+    fn dev_mut(&self) -> &mut Dev {
         unsafe { &mut *self.device.get() }
     }
 }
@@ -46,16 +42,17 @@ impl embassy_net_driver::Driver for E1000Embassy {
         Self: 'a;
 
     fn receive(&mut self, cx: &mut Context) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        if self.dev().has_rx_packet() && self.dev().has_tx_space() {
+        let (rx, tx) = self.dev_mut().split();
+        if rx.has_rx_packet() && tx.has_tx_space() {
             return Some((RxToken { parent: self }, TxToken { parent: self }));
         }
-        // Wake immediately so the executor re-polls us (busy-poll mode)
         cx.waker().wake_by_ref();
         None
     }
 
     fn transmit(&mut self, cx: &mut Context) -> Option<Self::TxToken<'_>> {
-        if self.dev().has_tx_space() {
+        let (_, tx) = self.dev_mut().split();
+        if tx.has_tx_space() {
             return Some(TxToken { parent: self });
         }
         cx.waker().wake_by_ref();
@@ -63,7 +60,6 @@ impl embassy_net_driver::Driver for E1000Embassy {
     }
 
     fn link_state(&mut self, cx: &mut Context) -> LinkState {
-        // Wake so runner keeps polling
         cx.waker().wake_by_ref();
         LinkState::Up
     }
@@ -85,10 +81,8 @@ pub struct RxToken<'a> {
 
 impl<'a> embassy_net_driver::RxToken for RxToken<'a> {
     fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, f: F) -> R {
-        self.parent
-            .dev_mut()
-            .e1000_recv_with(f)
-            .expect("packet was ready in receive()")
+        let (mut rx, _) = self.parent.dev_mut().split();
+        rx.recv_with(f).expect("packet was ready in receive()")
     }
 }
 
@@ -98,9 +92,7 @@ pub struct TxToken<'a> {
 
 impl<'a> embassy_net_driver::TxToken for TxToken<'a> {
     fn consume<R, F: FnOnce(&mut [u8]) -> R>(self, len: usize, f: F) -> R {
-        let mut buf = [0u8; 1514];
-        let result = f(&mut buf[..len]);
-        self.parent.dev_mut().e1000_transmit(&buf[..len]);
-        result
+        let (_, mut tx) = self.parent.dev_mut().split();
+        tx.transmit_with(len, f).expect("tx space was available")
     }
 }

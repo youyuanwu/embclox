@@ -13,7 +13,7 @@ embassy-sync.workspace = true
 embassy-futures.workspace = true
 embedded-io-async.workspace = true
 
-e1000-driver.workspace = true
+e1000.workspace = true
 bootloader_api.workspace = true
 x86_64.workspace = true
 uart_16550.workspace = true

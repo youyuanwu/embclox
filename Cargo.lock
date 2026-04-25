@@ -197,8 +197,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "e1000-driver"
-version = "0.2.0"
+name = "e1000"
+version = "0.1.0"
 dependencies = [
  "log",
 ]
@@ -209,7 +209,7 @@ version = "0.1.0"
 dependencies = [
  "bootloader_api",
  "critical-section",
- "e1000-driver",
+ "e1000",
  "embassy-executor",
  "embassy-futures",
  "embassy-net",

@@ -1,8 +1,9 @@
 use alloc::alloc::{Layout, alloc_zeroed, dealloc};
+use e1000::dma::{DmaAllocator, DmaRegion};
 use log::*;
 
-/// KernelFunc implementation for x86_64 with bootloader offset-mapped memory.
-pub struct Kernfn {
+/// DmaAllocator implementation for x86_64 with bootloader offset-mapped memory.
+pub struct BootDmaAllocator {
     /// Offset to convert kernel virtual addresses to physical:
     ///   paddr = kernel_vaddr - kernel_offset
     pub kernel_offset: u64,
@@ -13,32 +14,28 @@ pub struct Kernfn {
     pub phys_offset: u64,
 }
 
-impl e1000_driver::e1000::KernelFunc for Kernfn {
-    const PAGE_SIZE: usize = 4096;
-
-    fn dma_alloc_coherent(&mut self, pages: usize) -> (usize, usize) {
-        let size = pages * Self::PAGE_SIZE;
-        let layout = Layout::from_size_align(size, Self::PAGE_SIZE).expect("invalid DMA layout");
+impl DmaAllocator for BootDmaAllocator {
+    fn alloc_coherent(&self, size: usize, align: usize) -> DmaRegion {
+        let layout = Layout::from_size_align(size, align).expect("invalid DMA layout");
         let ptr = unsafe { alloc_zeroed(layout) };
-        assert!(!ptr.is_null(), "DMA allocation of {} pages failed", pages);
+        assert!(!ptr.is_null(), "DMA allocation of {} bytes failed", size);
         let heap_vaddr = ptr as usize;
         let paddr = heap_vaddr - self.kernel_offset as usize;
         // Return vaddr through the phys_offset mapping so CPU reads are
         // coherent with DMA writes in QEMU TCG mode.
         let vaddr = paddr + self.phys_offset as usize;
         info!(
-            "DMA alloc: {} pages, paddr={:#x}, vaddr={:#x}",
-            pages, paddr, vaddr
+            "DMA alloc: {} bytes, paddr={:#x}, vaddr={:#x}",
+            size, paddr, vaddr
         );
-        (vaddr, paddr)
+        DmaRegion { vaddr, paddr, size }
     }
 
-    fn dma_free_coherent(&mut self, vaddr: usize, pages: usize) {
+    fn free_coherent(&self, region: &DmaRegion) {
         // Convert phys_offset vaddr back to kernel vaddr for dealloc
-        let paddr = vaddr - self.phys_offset as usize;
+        let paddr = region.vaddr - self.phys_offset as usize;
         let heap_vaddr = paddr + self.kernel_offset as usize;
-        let size = pages * Self::PAGE_SIZE;
-        let layout = Layout::from_size_align(size, Self::PAGE_SIZE).unwrap();
+        let layout = Layout::from_size_align(region.size, 4096).unwrap();
         unsafe { dealloc(heap_vaddr as *mut u8, layout) };
     }
 }

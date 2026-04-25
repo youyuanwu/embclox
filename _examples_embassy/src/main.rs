@@ -4,23 +4,25 @@
 extern crate alloc;
 
 mod critical_section_impl;
+mod dma_alloc;
 mod e1000_adapter;
 mod heap;
-mod kernfn;
 mod logger;
 mod mmio;
+mod mmio_regs;
 mod pci_init;
 mod serial;
 mod time_driver;
 
 use bootloader_api::{BootInfo, BootloaderConfig, config::Mapping, entry_point};
 use core::panic::PanicInfo;
+use dma_alloc::BootDmaAllocator;
 use e1000_adapter::E1000Embassy;
 use embassy_executor::Executor;
 use embassy_net::{Ipv4Address, Ipv4Cidr, Stack, StackResources, StaticConfigV4};
 use embedded_io_async::Write;
-use kernfn::Kernfn;
 use log::*;
+use mmio_regs::MmioRegs;
 use static_cell::StaticCell;
 
 const BOOTLOADER_CONFIG: BootloaderConfig = {
@@ -59,47 +61,38 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     );
     info!("e1000 MMIO vaddr: {:#x}", e1000_vaddr);
 
-    // Initialize e1000 driver
-    let kfn = Kernfn {
+    let regs = MmioRegs::new(e1000_vaddr);
+
+    // Caller performs device reset before new() per driver contract
+    e1000_reset(&regs);
+    pci_init::pci_enable_bus_mastering(pci_info.dev);
+
+    // Initialize e1000 driver (post-reset init: rings, TCTL, RCTL)
+    let dma = BootDmaAllocator {
         kernel_offset: kernel_virt_to_phys,
         phys_offset,
     };
-    let mut e1000_device = e1000_driver::e1000::E1000Device::<Kernfn>::new(kfn, e1000_vaddr)
-        .expect("e1000 init failed");
+    let mut e1000_device = e1000::E1000Device::new(regs, dma);
     info!("e1000 driver initialized");
 
-    // Re-enable PCI bus mastering AFTER device reset (reset clears the command register)
-    pci_init::pci_enable_bus_mastering(pci_info.dev);
-
-    // Read MAC from the device's RAL/RAH registers
-    let mac = unsafe {
-        let regs_ptr = e1000_vaddr as *const u32;
-        let ral = core::ptr::read_volatile(regs_ptr.add(0x5400 / 4));
-        let rah = core::ptr::read_volatile(regs_ptr.add(0x5404 / 4));
-        [
-            ral as u8,
-            (ral >> 8) as u8,
-            (ral >> 16) as u8,
-            (ral >> 24) as u8,
-            rah as u8,
-            (rah >> 8) as u8,
-        ]
-    };
+    let mac = e1000_device.mac_address();
     info!(
         "MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     );
 
-    // Send a gratuitous ARP to trigger QEMU's e1000 model to re-evaluate RX readiness.
-    // After device reset + re-init, QEMU's slirp may have cached rx_can_recv=false.
-    // A TX triggers qemu_flush_queued_packets() which re-polls rx_can_recv.
+    // Send a gratuitous ARP to trigger QEMU slirp to re-evaluate RX readiness.
     let arp: [u8; 42] = [
         0xff, 0xff, 0xff, 0xff, 0xff, 0xff, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], 0x08,
         0x06, 0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01, mac[0], mac[1], mac[2], mac[3],
         mac[4], mac[5], 10, 0, 2, 15, 0, 0, 0, 0, 0, 0, 10, 0, 2, 2,
     ];
-    e1000_device.e1000_transmit(&arp);
+    {
+        let (_, mut tx) = e1000_device.split();
+        tx.transmit(&arp);
+    }
     info!("Sent gratuitous ARP");
+
     let driver = E1000Embassy::new(e1000_device, mac);
 
     // Embassy networking stack with static IP
@@ -124,6 +117,34 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         spawner.spawn(net_task(runner).expect("net_task spawn token"));
         spawner.spawn(echo_task(stack).expect("echo_task spawn token"));
     });
+}
+
+/// Perform e1000 device reset (caller responsibility per driver contract).
+fn e1000_reset(regs: &MmioRegs) {
+    use e1000::RegisterAccess;
+    use e1000::regs::*;
+
+    regs.write_reg(IMS, 0); // disable interrupts
+    let ctl = regs.read_reg(CTL);
+    regs.write_reg(CTL, ctl | CTL_RST);
+
+    // Wait for reset to complete (Intel 82540 spec: ≤ 1ms)
+    let mut timeout = 100_000u32;
+    loop {
+        if regs.read_reg(CTL) & CTL_RST == 0 {
+            break;
+        }
+        timeout -= 1;
+        assert!(timeout > 0, "e1000 reset timeout");
+    }
+
+    regs.write_reg(IMS, 0); // re-disable interrupts
+    regs.write_reg(CTL, CTL_SLU | CTL_ASDE);
+    regs.write_reg(FCAL, 0);
+    regs.write_reg(FCAH, 0);
+    regs.write_reg(FCT, 0);
+    regs.write_reg(FCTTV, 0);
+    info!("e1000 device reset complete");
 }
 
 #[embassy_executor::task]
