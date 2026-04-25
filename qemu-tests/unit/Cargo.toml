@@ -1,0 +1,11 @@
+[package]
+name = "embclox-unit-tests"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+embclox-e1000.workspace = true
+embclox-hal-x86.workspace = true
+bootloader_api.workspace = true
+x86_64.workspace = true
+log.workspace = true

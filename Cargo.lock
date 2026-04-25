@@ -345,6 +345,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "embclox-unit-tests"
+version = "0.1.0"
+dependencies = [
+ "bootloader_api",
+ "embclox-e1000",
+ "embclox-hal-x86",
+ "log",
+ "x86_64",
+]
+
+[[package]]
 name = "embedded-hal"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

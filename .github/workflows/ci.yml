@@ -37,14 +37,19 @@ jobs:
         working-directory: examples
         run: cargo clippy -- -D warnings
 
-      - name: Build disk image
+      - name: Clippy unit tests
+        working-directory: qemu-tests/unit
+        run: cargo clippy -- -D warnings
+
+      - name: Build disk images
         run: |
           cargo build --manifest-path examples/Cargo.toml --target x86_64-unknown-none
+          cargo build --manifest-path qemu-tests/unit/Cargo.toml --target x86_64-unknown-none
           cargo run -p embclox-mkimage -- target/x86_64-unknown-none/debug/embclox-example target/x86_64-unknown-none/debug/embclox-example.img
+          cargo run -p embclox-mkimage -- target/x86_64-unknown-none/debug/embclox-unit-tests target/x86_64-unknown-none/debug/embclox-unit-tests.img
 
       - name: Install QEMU
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 netcat-openbsd
 
-      - name: QEMU integration test
-        working-directory: examples
-        run: bash test.sh
+      - name: QEMU tests
+        run: cmake -B build && ctest --test-dir build --output-on-failure

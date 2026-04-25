@@ -4,6 +4,7 @@ resolver = "2"
 members = [
     "tools/embclox-mkimage",
     "examples",
+    "qemu-tests/unit",
     "crates/embclox-e1000",
     "crates/embclox-hal-x86",
 ]
