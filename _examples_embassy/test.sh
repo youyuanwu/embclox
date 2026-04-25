@@ -1,13 +1,13 @@
 #!/bin/bash
-# test.sh — Build and run the e1000-embassy example on QEMU, verify TCP echo.
+# test.sh — Run the e1000-embassy example on QEMU and verify TCP echo.
 #
 # Usage: ./test.sh [--release]
 # Requires: qemu-system-x86_64, nc (netcat)
+# Expects the disk image to be pre-built (via cmake --build build --target image)
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR"
 
 MODE=debug
 if [[ "${1:-}" == "--release" ]]; then
@@ -19,14 +19,7 @@ GUEST_PORT=1234
 TIMEOUT=30
 TEST_STRING="hello-embassy-e1000"
 
-echo "=== Building (${MODE}) ==="
-if [[ "$MODE" == "release" ]]; then
-    make image mode=release
-else
-    make image
-fi
-
-IMAGE="../target/x86_64-unknown-none/${MODE}/e1000-embassy-example.img"
+IMAGE="$SCRIPT_DIR/../target/x86_64-unknown-none/${MODE}/e1000-embassy-example.img"
 
 if [[ ! -f "$IMAGE" ]]; then
     echo "ERROR: disk image not found at $IMAGE"

@@ -38,8 +38,9 @@ jobs:
         run: cargo clippy -- -D warnings
 
       - name: Build disk image
-        working-directory: _examples_embassy
-        run: make image
+        run: |
+          cargo build --manifest-path _examples_embassy/Cargo.toml --target x86_64-unknown-none
+          cargo run -p mkimage -- target/x86_64-unknown-none/debug/e1000-embassy-example target/x86_64-unknown-none/debug/e1000-embassy-example.img
 
       - name: Install QEMU
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 netcat-openbsd
