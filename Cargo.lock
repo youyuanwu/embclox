@@ -350,11 +350,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "embclox-hyperv"
+version = "0.1.0"
+dependencies = [
+ "embclox-e1000",
+ "embclox-hal-x86",
+ "log",
+]
+
+[[package]]
 name = "embclox-hyperv-example"
 version = "0.1.0"
 dependencies = [
  "bootloader_api",
+ "embclox-core",
  "embclox-hal-x86",
+ "embclox-hyperv",
  "log",
  "x86_64",
 ]

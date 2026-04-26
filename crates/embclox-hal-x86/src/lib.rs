@@ -32,7 +32,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             serial_port: 0x3F8,
-            heap_size: 4 * 1024 * 1024, // 4 MiB
+            heap_size: 8 * 1024 * 1024, // 8 MiB
         }
     }
 }

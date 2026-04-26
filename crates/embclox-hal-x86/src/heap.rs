@@ -3,7 +3,7 @@ use linked_list_allocator::LockedHeap;
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
-const HEAP_SIZE: usize = 4 * 1024 * 1024; // 4 MiB max
+const HEAP_SIZE: usize = 8 * 1024 * 1024; // 8 MiB max
 
 #[unsafe(link_section = ".bss")]
 static mut HEAP_AREA: [u8; HEAP_SIZE] = [0; HEAP_SIZE];

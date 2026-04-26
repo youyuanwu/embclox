@@ -1,5 +1,5 @@
 use x86_64::structures::paging::{
-    Mapper, OffsetPageTable, Page, PageTableFlags, PhysFrame, Size4KiB,
+    Mapper, OffsetPageTable, Page, PageTableFlags, PhysFrame, Size4KiB, Translate,
 };
 use x86_64::{PhysAddr, VirtAddr};
 
@@ -101,6 +101,53 @@ impl MemoryMapper {
             vaddr: virt_base as usize,
             size,
         }
+    }
+
+    /// Map a physical region as executable code pages (cached, no NO_EXECUTE).
+    /// Unlike `map_mmio`, this does not set NO_CACHE — suitable for code pages
+    /// like the Hyper-V hypercall page.
+    pub fn map_code(&mut self, phys_base: u64, size: u64) -> MmioMapping {
+        let mut mapper = page_table_mapper(self.phys_offset);
+        let mut allocator = HeapFrameAllocator {
+            kernel_offset: self.kernel_offset,
+        };
+
+        let virt_base = self.next_vaddr;
+        let num_pages = size.div_ceil(0x1000);
+        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+
+        for i in 0..num_pages {
+            let page = Page::<Size4KiB>::containing_address(VirtAddr::new(virt_base + i * 0x1000));
+            let frame = PhysFrame::containing_address(PhysAddr::new(phys_base + i * 0x1000));
+            unsafe {
+                mapper
+                    .map_to(page, frame, flags, &mut allocator)
+                    .expect("code map_to failed")
+                    .flush();
+            }
+        }
+
+        self.next_vaddr = virt_base + (num_pages + 1) * 0x1000;
+
+        log::info!(
+            "CODE: mapped phys {:#x} to virt {:#x} ({} pages)",
+            phys_base,
+            virt_base,
+            num_pages
+        );
+
+        MmioMapping {
+            vaddr: virt_base as usize,
+            size,
+        }
+    }
+
+    /// Translate a virtual address to its physical address via page table walk.
+    pub fn translate_addr(&self, vaddr: u64) -> Option<u64> {
+        let mapper = page_table_mapper(self.phys_offset);
+        mapper
+            .translate_addr(VirtAddr::new(vaddr))
+            .map(|p| p.as_u64())
     }
 
     /// Unmap a previously mapped MMIO region.

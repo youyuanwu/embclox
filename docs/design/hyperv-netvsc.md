@@ -489,7 +489,7 @@ understanding what hardware Azure exposes vs. local Hyper-V.
 | **Synthetic NIC** | Optional (needs netvsc) | **Only option** (needs netvsc) | Only option (needs netvsc) |
 | **Synthetic disk** | Optional (needs storvsc) | Optional (IDE suffices for boot) | **Required** (no IDE) |
 
-### Why Gen1 Is Not Viable
+### Gen1 Status Update (2026-04-26)
 
 Gen1 VMs use BIOS boot, but `bootloader` v0.11's BIOS stage
 unconditionally attempts VBE (VESA BIOS Extensions) framebuffer setup.
@@ -497,46 +497,62 @@ Hyper-V's virtual BIOS does not implement VBE, causing a hang before
 the kernel starts. This is a known upstream issue (bootloader GitHub
 issues #575, #222). Tested 2026-04-25.
 
-### Gen2 Is the Target
+**Gen1 is viable if VBE is bypassed.** ReactOS runs on Hyper-V Gen1
+and Azure Gen1 using only legacy emulated devices (VGA + IDE + Tulip
+NIC) — no VMBus needed. The approach:
+
+1. Use VGA text mode (port I/O at 0x3C0-0x3DF, framebuffer at 0xA0000)
+   instead of VBE graphics mode — works without any driver
+2. Use DEC 21140 Tulip NIC (`0x1011:0x0009`) for networking — requires
+   new driver, but the chip is well-documented and simpler than e1000
+3. Use COM1 serial via named pipe for debug output — confirmed working
+   on Gen1
+
+**To pursue Gen1**: either patch bootloader to skip VBE, or use a
+different bootloader (e.g., limine) that supports VGA text mode.
+
+### Gen2 Status Update (2026-04-26)
 
 Gen2 uses UEFI firmware, which `bootloader` v0.11 supports via
-`create_uefi_image()`. UEFI boot avoids VBE entirely.
+`create_uefi_image()`. UEFI boot works — kernel runs (confirmed via
+crash-checkpoint debugging). However:
 
-**Gen2 requirements vs current state**:
+- **Display**: Synthvid VMBus protocol completes without errors (version
+  negotiated, VRAM acknowledged, resolution set), but VM Connect shows
+  black. No hobby OS has achieved Gen2 display — only Linux/FreeBSD
+  have working synthvid drivers (hyperv_fb).
+- **Serial**: Port 0x3F8 is NOT emulated on Gen2. `Set-VMComPort`
+  configures a named pipe but the firmware doesn't provide a 16550 UART.
+  VMBus synthetic serial is only accessible via Azure Serial Console.
+- **Networking**: Requires VMBus netvsc (no legacy NIC on Gen2).
 
-| Requirement | Current State | Action Needed |
-|-------------|--------------|---------------|
-| UEFI boot image | `create_bios_image` only | Add `create_uefi_image` to `embclox-mkimage` |
-| Disk format | VHD (raw→vpc) | VHDX preferred for Gen2, VHD also works |
-| Boot disk | SCSI (storvsc) | **Not needed** — UEFI loads kernel+initrd to RAM, our kernel never accesses disk after boot |
-| Serial output | COM1 (0x3F8) | ❌ No COM port on Gen2 — need alternative |
-| Debug output | Named pipe | Use UEFI console (visible in VM Connect) or Hyper-V KVP/network logging |
-| Secure Boot | Enabled by default | Must disable (our bootloader is not signed) |
-| Network | Synthetic NIC only | Same as Gen1 — needs netvsc |
+### ReactOS Comparison
 
-### Serial Output on Gen2
+ReactOS runs on Hyper-V Gen1 and Azure Gen1 using ONLY legacy emulated
+hardware. It does NOT implement any VMBus drivers (no netvsc, synthvid,
+or storvsc). Azure Gen1 support is experimental/demo quality.
 
-Gen2 VMs have **no COM ports**. Options for debug output:
+| | ReactOS | embclox (current) |
+|---|---|---|
+| Gen1 display | VGA text mode ✅ | Bootloader VBE hang ❌ |
+| Gen1 network | DEC 21140 Tulip ✅ | No Tulip driver ❌ |
+| Gen1 serial | COM1 ✅ | COM1 ✅ (if VBE bypassed) |
+| Gen2 display | Not supported ❌ | Protocol complete, display black ❌ |
+| Gen2 network | Not supported ❌ | VMBus stack built, netvsc WIP |
+| VMBus | Not implemented ❌ | Fully implemented ✅ |
 
-1. **UEFI console output** — visible in the VM Connect window during
-   boot. The `bootloader` crate's UEFI stage uses EFI console services,
-   so bootloader messages appear. After kernel handoff, we'd need to
-   write to the EFI framebuffer (which `bootloader` v0.11 maps for us).
+### Recommended Path
 
-2. **Hyper-V synthetic serial (VMBus)** — requires netvsc-like VMBus
-   driver for a synthetic COM port. Chicken-and-egg problem: need the
-   driver we're trying to debug.
+**Gen1 for initial bring-up** (immediate visible results):
+- Fix bootloader VBE issue → VGA text mode display
+- Write DEC 21140 Tulip NIC driver → networking
+- COM1 serial for debugging → unblocks all further work
+- Works on both local Hyper-V and Azure Gen1
 
-3. **Framebuffer text rendering** — write directly to the UEFI
-   framebuffer that `bootloader` provides. Simple bitmap font renderer,
-   ~200 LOC. This works for all output without VMBus.
-
-4. **Keep COM port for QEMU** — our serial driver still works on QEMU.
-   Use framebuffer output on Hyper-V, serial on QEMU. Feature-gate
-   or auto-detect at runtime.
-
-**Recommended**: Option 3 (framebuffer text) + option 4 (keep serial
-for QEMU). The framebuffer is always available on both platforms.
+**Gen2 for production** (future, needs Linux ftrace comparison):
+- VMBus + netvsc for networking (crate built)
+- VMBus + synthvid for display (protocol WIP)
+- SR-IOV for high-performance networking
 
 ### Hyper-V Test Script Changes
 

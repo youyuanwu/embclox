@@ -76,7 +76,15 @@ impl PciBus {
     pub fn read_bar(&self, dev: &PciDevice, bar: u8) -> u64 {
         let offset = 0x10 + bar * 4;
         let raw = pci_read32(dev.bus, dev.dev, dev.func, offset);
-        (raw & !0xF) as u64
+        let bar_type = (raw >> 1) & 0x3;
+
+        if bar_type == 0x2 {
+            // 64-bit BAR: upper 32 bits in the next register
+            let upper = pci_read32(dev.bus, dev.dev, dev.func, offset + 4);
+            ((upper as u64) << 32) | ((raw & !0xF) as u64)
+        } else {
+            (raw & !0xF) as u64
+        }
     }
 
     /// Read a 32-bit PCI configuration register.

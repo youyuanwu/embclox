@@ -9,6 +9,7 @@ members = [
     "crates/embclox-core",
     "crates/embclox-e1000",
     "crates/embclox-hal-x86",
+    "crates/embclox-hyperv",
     "crates/embclox-test-macros",
 ]
 
@@ -17,6 +18,7 @@ default-members = [
     "crates/embclox-core",
     "crates/embclox-e1000",
     "crates/embclox-hal-x86",
+    "crates/embclox-hyperv",
     "crates/embclox-test-macros",
 ]
 
@@ -32,6 +34,7 @@ embassy-futures = "0.1"
 embedded-io-async = "0.7"
 
 # Drivers & platform
+embclox-hyperv = { path = "crates/embclox-hyperv" }
 embclox-core = { path = "crates/embclox-core" }
 embclox-e1000 = { path = "crates/embclox-e1000" }
 embclox-hal-x86 = { path = "crates/embclox-hal-x86" }
