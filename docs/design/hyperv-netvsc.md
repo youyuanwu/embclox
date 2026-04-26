@@ -9,8 +9,10 @@ is the only paravirtual transport. To run embclox natively on Hyper-V, we
 need a NetVSC (Network Virtual Service Client) driver.
 
 > **Note**: Hyper-V Gen1 VMs offer a "Legacy Network Adapter" that emulates
-> a DEC 21140 (Tulip), **not** e1000. This is a different chip entirely and
-> not useful without writing a Tulip driver.
+> a DEC 21140 (Tulip). The `embclox-tulip` crate implements this driver and
+> works on **local Hyper-V Gen1** (see `hyperv-gen1.md`). However, Azure Gen1
+> VMs do NOT expose the legacy NIC on PCI — only VMBus synthetic devices are
+> available. NetVSC is required for Azure networking.
 
 ## Architecture Overview
 

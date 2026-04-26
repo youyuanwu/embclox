@@ -156,6 +156,23 @@ add_custom_command(
 )
 add_custom_target(tulip-image DEPENDS ${TULIP_ISO})
 
+# --- Tulip VHD image (for Hyper-V / Azure Gen1) ---
+
+set(LIMINE_TOOL "${CMAKE_BINARY_DIR}/limine-tool")
+set(TULIP_VHD "${CMAKE_BINARY_DIR}/tulip.vhd")
+
+add_custom_command(
+    OUTPUT ${TULIP_VHD}
+    COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/mkvhd.sh
+        ${CMAKE_SOURCE_DIR}/${TULIP_KERNEL_REL}
+        ${limine_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/examples-tulip/limine.conf
+        ${TULIP_VHD}
+    DEPENDS tulip-build
+    COMMENT "Creating Tulip VHD image (BIOS+UEFI)"
+)
+add_custom_target(tulip-vhd DEPENDS ${TULIP_VHD})
+
 add_custom_target(qemu-tulip
     COMMAND qemu-system-x86_64
         -machine q35

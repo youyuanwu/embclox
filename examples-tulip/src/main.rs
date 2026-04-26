@@ -343,6 +343,21 @@ unsafe extern "C" fn kmain() -> ! {
 
     // Scan PCI for Tulip NIC
     writeln!(serial, "Scanning PCI bus for Tulip NIC...").ok();
+    // Dump all PCI devices for diagnostics
+    for slot in 0..32u8 {
+        let id = pci_config_read(0, slot, 0, 0);
+        let vendor = id & 0xFFFF;
+        let device = (id >> 16) & 0xFFFF;
+        if vendor != 0xFFFF {
+            let class = pci_config_read(0, slot, 0, 0x08);
+            writeln!(
+                serial,
+                "  PCI {:02}:00.0 {:04x}:{:04x} class={:08x}",
+                slot, vendor, device, class
+            )
+            .ok();
+        }
+    }
     let (slot, dev_id) = find_tulip().expect("No Tulip NIC found on PCI bus");
     writeln!(
         serial,

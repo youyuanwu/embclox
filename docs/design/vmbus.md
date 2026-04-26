@@ -8,6 +8,11 @@ the foundation: without it, no Hyper-V device works. We implement
 VMBus first, then synthvid (video) for display output, then netvsc
 (network) for networking.
 
+> **Current status**: The Tulip (DEC 21140) driver provides networking on
+> local Hyper-V Gen1 VMs without VMBus (see `hyperv-gen1.md`). VMBus is
+> needed for Azure Gen1 VMs (which don't expose the legacy NIC on PCI)
+> and for Gen2 VMs.
+
 ## Implementation Order
 
 ```

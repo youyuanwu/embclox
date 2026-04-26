@@ -49,10 +49,18 @@ Gen1 also offers synthetic VMBus devices (netvsc, storvsc) alongside
 legacy devices, but the legacy devices work without any Hyper-V
 specific code.
 
-> **Azure note**: Azure Gen1 VMs do NOT expose the legacy Tulip NIC —
-> only the VMBus netvsc synthetic adapter. The Tulip driver works on
-> local Hyper-V Gen1 only. Azure networking requires the full VMBus
-> netvsc stack (see `hyperv-netvsc.md`).
+> **Azure note**: Azure Gen1 VMs do NOT expose the legacy Tulip NIC.
+> PCI scan shows only chipset bridges and a Hyper-V synthetic VGA device:
+>
+> | Slot | Vendor:Device | Description |
+> |------|---------------|-------------|
+> | 00:00.0 | 8086:7192 | Intel 440BX PCI bridge |
+> | 07:00.0 | 8086:7110 | Intel PIIX4 ISA bridge |
+> | 08:00.0 | 1414:5353 | Hyper-V Synthetic VGA |
+>
+> The NIC on Azure is a VMBus synthetic device (not on PCI bus).
+> The Tulip driver works on **local Hyper-V Gen1 only**. Azure
+> networking requires the VMBus netvsc stack.
 
 ## Architecture
 
@@ -584,14 +592,21 @@ framework — boot kernel, run test, check serial output, timeout.
 | DMA addresses not page-aligned | Bump allocator aligned within heap offset, not absolute | Fixed alignment to use absolute address |
 | DMA paddr wrong (NIC reads zeros) | Kernel `.bss` physical mapping differs from `kernel_offset` | Switched to HHDM-based physical memory pool |
 | TX packets never sent | `TDES1_FS`/`TDES1_LS` at bits 28/29 instead of 29/30 | Corrected to match DEC 21140 spec |
+| Hyper-V serial hang | `LSR.THRE` never set on virtual UART | Bounded spin-wait with 10K iteration limit |
+| Hyper-V TSC calibration panic | PIT channel 2 output bit never set | Fallback to default 1 GHz if calibration returns 0 |
+| Hyper-V RX not working | Hyper-V virtual switch drops frames with EEPROM MAC ≠ VM-assigned MAC | Enable MAC address spoofing on legacy NIC |
+| Hyper-V DHCP never sends | Same MAC mismatch — DHCP DISCOVER sent but response never received | MAC spoofing fix + 21140 setup frame for receive filter |
 
-### Phase 4: Hyper-V Gen1 Deployment (~100 LOC)
+### Phase 4: Hyper-V Gen1 Deployment
 
-1. PowerShell script: create Gen1 VM, attach disk image
-2. Configure COM1 named pipe for serial debug
-3. Boot same image on Gen1 VM
-4. Test with both DEC 21140 (`0x0009`) and 21143 (`0x0019`) device IDs
-5. **Verify**: Serial output via PuTTY, TCP echo from host
+**Completed.** Boot + TCP echo verified on local Hyper-V Gen1.
+
+1. `scripts/hyperv-tulip-test.ps1`: creates Gen1 VM, reads COM1 pipe, probes TCP echo
+2. `scripts/mkvhd.sh`: builds bootable VHD image (BIOS+UEFI dual boot)
+3. `tests/infra/main.bicep`: Azure Gen1 VM deployment (bicep template)
+4. DEC 21140 detected at I/O port `0xec00`, MAC from EEPROM
+5. DHCP lease obtained, TCP echo passes on local Hyper-V Gen1
+6. **Azure Gen1**: kernel boots but no Tulip NIC on PCI bus (Azure uses VMBus synthetic NIC)
 
 ### Actual LOC
 
