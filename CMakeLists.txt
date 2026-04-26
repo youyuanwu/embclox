@@ -106,16 +106,18 @@ FetchContent_MakeAvailable(limine)
 
 set(LIMINE_BOOTX64 "${limine_SOURCE_DIR}/BOOTX64.EFI")
 set(LIMINE_UEFI_CD "${limine_SOURCE_DIR}/limine-uefi-cd.bin")
+set(LIMINE_BIOS_CD "${limine_SOURCE_DIR}/limine-bios-cd.bin")
+set(LIMINE_BIOS_SYS "${limine_SOURCE_DIR}/limine-bios.sys")
 
 set(TULIP_KERNEL_REL "target/${TARGET}/release/embclox-tulip-example")
 
 add_custom_target(tulip-build
     COMMAND cargo build --release
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/examples-tulip
-    COMMENT "Building Tulip example (Limine UEFI)"
+    COMMENT "Building Tulip example (Limine BIOS+UEFI)"
 )
 
-# Build the Limine ISO image for UEFI boot
+# Build the Limine ISO image (BIOS + UEFI dual boot)
 set(TULIP_ISO "${CMAKE_BINARY_DIR}/tulip.iso")
 
 add_custom_command(
@@ -128,19 +130,29 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy
         ${CMAKE_SOURCE_DIR}/examples-tulip/limine.conf
         ${CMAKE_BINARY_DIR}/tulip-iso/boot/limine/limine.conf
+    # UEFI boot files
     COMMAND ${CMAKE_COMMAND} -E copy
         ${LIMINE_BOOTX64}
         ${CMAKE_BINARY_DIR}/tulip-iso/EFI/BOOT/BOOTX64.EFI
     COMMAND ${CMAKE_COMMAND} -E copy
         ${LIMINE_UEFI_CD}
         ${CMAKE_BINARY_DIR}/tulip-iso/boot/limine/limine-uefi-cd.bin
+    # BIOS boot files (needed for Hyper-V Gen1)
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${LIMINE_BIOS_CD}
+        ${CMAKE_BINARY_DIR}/tulip-iso/boot/limine/limine-bios-cd.bin
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${LIMINE_BIOS_SYS}
+        ${CMAKE_BINARY_DIR}/tulip-iso/boot/limine/limine-bios.sys
     COMMAND xorriso -as mkisofs
+        -b boot/limine/limine-bios-cd.bin
+        -no-emul-boot -boot-load-size 4 -boot-info-table
         --efi-boot boot/limine/limine-uefi-cd.bin
         -efi-boot-part --efi-boot-image --protective-msdos-label
         ${CMAKE_BINARY_DIR}/tulip-iso -o ${TULIP_ISO}
         2>/dev/null
     DEPENDS tulip-build ${LIMINE_BOOTX64}
-    COMMENT "Creating Tulip UEFI ISO image"
+    COMMENT "Creating Tulip BIOS+UEFI ISO image"
 )
 add_custom_target(tulip-image DEPENDS ${TULIP_ISO})
 

@@ -89,7 +89,13 @@ impl SerialPort {
     }
 
     fn write_byte(&self, byte: u8) {
-        while inb(self.port + 5) & 0x20 == 0 {
+        // Wait for TX holding register empty (LSR bit 5).
+        // Limit spin to avoid hanging on Hyper-V virtual UART which
+        // may not emulate LSR faithfully.
+        for _ in 0..10000u32 {
+            if inb(self.port + 5) & 0x20 != 0 {
+                break;
+            }
             core::hint::spin_loop();
         }
         outb(self.port, byte);

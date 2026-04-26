@@ -87,7 +87,11 @@ pub fn calibrate_tsc() {
 
     let tsc_per_50ms = end - start;
     let tsc_per_us = tsc_per_50ms / 50_000;
-    DRIVER.tsc_per_us.store(tsc_per_us, Ordering::Relaxed);
+    if tsc_per_us > 0 {
+        DRIVER.tsc_per_us.store(tsc_per_us, Ordering::Relaxed);
+    }
+    // If calibration failed (e.g. Hyper-V doesn't emulate PIT ch2),
+    // keep the default of 1000 (~1 GHz).
 }
 
 /// Check expired alarms — call from timer interrupt or poll loop.
