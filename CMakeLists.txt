@@ -25,18 +25,22 @@ add_custom_target(check
     COMMENT "Formatting and linting all crates"
 )
 
+set(IMAGE_ABS "${CMAKE_SOURCE_DIR}/${IMAGE_REL}")
+
 add_custom_target(example-build
     COMMAND cargo build ${BUILD_ARGS}
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/examples
     COMMENT "Building embclox example (${MODE})"
 )
 
-add_custom_target(image
+add_custom_command(
+    OUTPUT ${IMAGE_ABS}
     COMMAND cargo run -p embclox-mkimage -- ${KERNEL_REL} ${IMAGE_REL}
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     DEPENDS example-build
     COMMENT "Creating BIOS disk image"
 )
+add_custom_target(example-image DEPENDS ${IMAGE_ABS})
 
 add_custom_target(qemu
     COMMAND qemu-system-x86_64
@@ -44,15 +48,16 @@ add_custom_target(qemu
         -no-reboot
         -serial mon:stdio
         -display none
-        -drive format=raw,file=${CMAKE_SOURCE_DIR}/${IMAGE_REL}
+        -drive format=raw,file=${IMAGE_ABS}
         -netdev user,id=net0,hostfwd=tcp::5555-:1234
         -device e1000,netdev=net0
-    DEPENDS image
+    DEPENDS example-image
     COMMENT "Running QEMU"
 )
 
 set(UNIT_KERNEL_REL "target/${TARGET}/${MODE}/embclox-unit-tests")
 set(UNIT_IMAGE_REL "${UNIT_KERNEL_REL}.img")
+set(UNIT_IMAGE_ABS "${CMAKE_SOURCE_DIR}/${UNIT_IMAGE_REL}")
 
 add_custom_target(unit-test-build
     COMMAND cargo build ${BUILD_ARGS}
@@ -60,24 +65,26 @@ add_custom_target(unit-test-build
     COMMENT "Building unit tests (${MODE})"
 )
 
-add_custom_target(unit-test-image
+add_custom_command(
+    OUTPUT ${UNIT_IMAGE_ABS}
     COMMAND cargo run -p embclox-mkimage -- ${UNIT_KERNEL_REL} ${UNIT_IMAGE_REL}
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     DEPENDS unit-test-build
     COMMENT "Creating unit test disk image"
 )
+add_custom_target(unit-test-image DEPENDS ${UNIT_IMAGE_ABS})
 
 # CTest tests — run with: ctest --test-dir build
 add_test(NAME unit
     COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/qemu-test.sh
-        ${CMAKE_SOURCE_DIR}/${UNIT_IMAGE_REL}
+        ${UNIT_IMAGE_ABS}
         --qemu-args "-netdev user,id=net0 -device e1000,netdev=net0"
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 
 add_test(NAME integration
     COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/qemu-test.sh
-        ${CMAKE_SOURCE_DIR}/${IMAGE_REL}
+        ${IMAGE_ABS}
         --probe tcp:5555:hello-embclox
         --qemu-args "-netdev user,id=net0,hostfwd=tcp::5555-:1234 -device e1000,netdev=net0"
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}

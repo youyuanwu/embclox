@@ -65,19 +65,20 @@ pub fn init(boot_info: &'static mut BootInfo, config: Config) -> Peripherals {
         .expect("physical_memory_offset not available");
 
     // Compute kernel_offset dynamically by probing the page tables.
-    // kernel_offset is the linear shift between kernel virtual addresses and
-    // physical addresses (i.e. kernel_vaddr - paddr). It is constant for all
-    // kernel-mapped memory, so we only need to probe once with any known
-    // kernel address. We use the same OffsetPageTable that MemoryMapper wraps
-    // internally, but after bootstrap we store the offset as a plain u64 for
-    // cheap arithmetic instead of repeating page-table walks.
+    // kernel_offset is the linear shift between kernel heap virtual addresses
+    // and physical addresses (i.e. heap_vaddr - paddr). We probe the heap
+    // area specifically because DMA allocations and page table frame
+    // allocations both come from the heap, so the offset must be correct
+    // for heap addresses. Different ELF segments may have different
+    // vaddr-paddr offsets due to alignment, so probing an arbitrary static
+    // (e.g. in .data) could give the wrong result.
     let kernel_offset: u64 = {
         let mapper = memory::page_table_mapper(phys_offset);
-        let probe_vaddr = VirtAddr::new(&INITIALIZED as *const _ as u64);
-        // Walk the page tables to resolve the physical address of the probe.
+        let probe_vaddr = VirtAddr::new(heap::heap_start() as u64);
+        // Walk the page tables to resolve the physical address of the heap.
         let probe_paddr = mapper
             .translate_addr(probe_vaddr)
-            .expect("failed to translate probe address for kernel_offset");
+            .expect("failed to translate heap address for kernel_offset");
         probe_vaddr.as_u64() - probe_paddr.as_u64()
     };
 
