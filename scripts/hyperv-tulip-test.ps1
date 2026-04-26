@@ -1,11 +1,26 @@
 # scripts/hyperv-tulip-test.ps1
-# Hyper-V Gen1 boot test for the Tulip NIC / Limine UEFI kernel.
-# Creates a Gen1 VM, attaches the ISO as a DVD, configures COM1 serial
-# output via named pipe, and boots the kernel.
 #
-# Usage:
+# Hyper-V Gen1 boot + TCP echo test for the Tulip NIC / Limine kernel.
+#
+# Creates a Gen1 VM with a Legacy Network Adapter (DEC 21140 Tulip),
+# attaches the ISO as a DVD, reads serial output from COM1 named pipe,
+# waits for DHCP, then sends a TCP echo probe to port 1234.
+#
+# Prerequisites:
+#   - Hyper-V enabled (Windows feature)
+#   - Build the ISO first (from WSL or Linux):
+#       cmake -B build
+#       cmake --build build --target tulip-image
+#     This produces build/tulip.iso
+#   - The script self-elevates (Hyper-V cmdlets require admin)
+#
+# Usage (from PowerShell or WSL):
+#   .\scripts\hyperv-tulip-test.ps1
 #   .\scripts\hyperv-tulip-test.ps1 -Iso build\tulip.iso
 #   .\scripts\hyperv-tulip-test.ps1 -Iso build\tulip.iso -TimeoutSeconds 120
+#
+# From WSL:
+#   powershell.exe -ExecutionPolicy Bypass -File scripts/hyperv-tulip-test.ps1 -Iso build/tulip.iso
 
 param(
     [string]$Iso = "build\tulip.iso",
@@ -101,7 +116,11 @@ if ($defaultNic) {
     Remove-VMNetworkAdapter -VMName $VMName
 }
 Add-VMNetworkAdapter -VMName $VMName -IsLegacy $true -SwitchName "Default Switch"
-Write-Host "Legacy Network Adapter added (DEC 21140 Tulip)" -ForegroundColor Green
+# Allow the kernel to use whatever MAC it reads from the emulated EEPROM.
+# Hyper-V's virtual switch filters by MAC — enable MAC spoofing so our
+# EEPROM-read MAC isn't dropped by the switch.
+Set-VMNetworkAdapter -VMName $VMName -MacAddressSpoofing On
+Write-Host "Legacy Network Adapter added (DEC 21140 Tulip, MAC spoofing on)" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "VM created (Gen1, 256MB, DVD boot, COM1 serial, Legacy NIC)"
@@ -133,10 +152,11 @@ try {
 $readerProc = Start-Process -FilePath "pwsh.exe" -ArgumentList "-NoProfile", "-Command", $readerScript `
     -NoNewWindow -PassThru
 
-# Stream output from the log file until timeout
+# Stream output from the log file until timeout or key output seen
 $serialLog = @()
 $deadline = [DateTime]::Now.AddSeconds($TimeoutSeconds)
 $lastPos = 0
+$initPassed = $false
 while ([DateTime]::Now -lt $deadline) {
     if (Test-Path $logFile) {
         $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
@@ -147,10 +167,30 @@ while ([DateTime]::Now -lt $deadline) {
             if ($newText -match "TULIP INIT PASSED") {
                 Write-Host ""
                 Write-Host ">>> Matched: TULIP INIT PASSED <<<" -ForegroundColor Green
+                $initPassed = $true
             }
             if ($newText -match "TCP echo server") {
                 Write-Host ""
                 Write-Host ">>> TCP echo server started <<<" -ForegroundColor Green
+            }
+            if ($newText -match "Starting Embassy executor") {
+                # Wait for DHCP to assign an IP (up to 15s)
+                Write-Host ""
+                Write-Host "Waiting for DHCP lease..." -ForegroundColor Cyan
+                $dhcpDeadline = [DateTime]::Now.AddSeconds(15)
+                while ([DateTime]::Now -lt $dhcpDeadline) {
+                    Start-Sleep -Milliseconds 500
+                    $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
+                    if ($content -and $content.Length -gt $lastPos) {
+                        $newChunk = $content.Substring($lastPos)
+                        Write-Host $newChunk -NoNewline
+                        $lastPos = $content.Length
+                        if ($newChunk -match "DHCP assigned") {
+                            break
+                        }
+                    }
+                }
+                break
             }
         }
     }
@@ -161,6 +201,75 @@ while ([DateTime]::Now -lt $deadline) {
 # Stop VM (closes the pipe, reader process will exit)
 Write-Host ""
 Write-Host "=== End Serial Output ===" -ForegroundColor Cyan
+
+# TCP echo test — try to connect to the kernel's echo server on port 1234.
+# The kernel uses a static IP; try to find it from serial output or VM network.
+Write-Host ""
+Write-Host "=== TCP Echo Test ===" -ForegroundColor Cyan
+
+# Try to find the VM's IP from Hyper-V
+$vmIp = $null
+$vmNic = Get-VMNetworkAdapter -VMName $VMName -ErrorAction SilentlyContinue
+if ($vmNic -and $vmNic.IPAddresses) {
+    foreach ($ip in $vmNic.IPAddresses) {
+        if ($ip -match '^\d+\.\d+\.\d+\.\d+$') {
+            $vmIp = $ip
+            break
+        }
+    }
+}
+
+# Also check serial log for the kernel's configured IP
+$kernelIp = $null
+if ($logFile -and (Test-Path $logFile)) {
+    $logContent = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
+    # Look for IP in log (e.g. "IP: 10.0.2.15" or similar)
+    if ($logContent -match '(\d+\.\d+\.\d+\.\d+)/\d+') {
+        $kernelIp = $Matches[1]
+    }
+}
+
+# The kernel has a static IP (10.0.2.15 for QEMU). Use kernel IP if found,
+# otherwise try VM IP from Hyper-V.
+$targetIp = if ($kernelIp) { $kernelIp } elseif ($vmIp) { $vmIp } else { $null }
+
+if ($targetIp) {
+    Write-Host "Target IP: $targetIp (kernel=$kernelIp, hyperv=$vmIp)"
+    $tcpPassed = $false
+    try {
+        $client = New-Object System.Net.Sockets.TcpClient
+        $connectTask = $client.ConnectAsync($targetIp, 1234)
+        if ($connectTask.Wait(5000)) {
+            $stream = $client.GetStream()
+            $stream.WriteTimeout = 3000
+            $stream.ReadTimeout = 3000
+            $testMsg = [System.Text.Encoding]::ASCII.GetBytes("hello-hyperv`n")
+            $stream.Write($testMsg, 0, $testMsg.Length)
+            $buf = New-Object byte[] 256
+            $n = $stream.Read($buf, 0, $buf.Length)
+            $reply = [System.Text.Encoding]::ASCII.GetString($buf, 0, $n).Trim()
+            Write-Host "Sent: hello-hyperv, Reply: $reply"
+            if ($reply -match "hello-hyperv") {
+                Write-Host ">>> TCP ECHO PASSED <<<" -ForegroundColor Green
+                $tcpPassed = $true
+            } else {
+                Write-Host ">>> TCP ECHO MISMATCH <<<" -ForegroundColor Yellow
+            }
+            $client.Close()
+        } else {
+            Write-Host "TCP connect timed out (5s)" -ForegroundColor Yellow
+            $client.Close()
+        }
+    } catch {
+        Write-Host "TCP test failed: $_" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host 'No IP found. Kernel uses static 10.0.2.15 (QEMU default).' -ForegroundColor Yellow
+    Write-Host 'For Hyper-V, update kernel to match Default Switch subnet or use DHCP.' -ForegroundColor Yellow
+    $tcpPassed = $false
+}
+
+Write-Host "=== End TCP Echo Test ===" -ForegroundColor Cyan
 
 $vm = Get-VM -Name $VMName
 $vmState = $vm.State
@@ -187,27 +296,28 @@ if (Test-Path $logFile) {
 
 if ($serialLog.Count -gt 0) {
     Write-Host ""
-    Write-Host "Serial log saved to: $logFile ($($serialLog.Count) lines)" -ForegroundColor Cyan
+    Write-Host "Serial log saved to: $logFile - $($serialLog.Count) lines" -ForegroundColor Cyan
 }
 
 # Results
 Write-Host ""
 Write-Host "=== Results ===" -ForegroundColor Cyan
-if ($serialLog.Count -gt 0) {
-    Write-Host "=== BOOT TEST PASSED (captured $($serialLog.Count) lines) ===" -ForegroundColor Green
-    $exitCode = 0
-} elseif ($vmState -eq 'Running') {
-    Write-Host "=== BOOT TEST PASSED (VM was running, no serial captured) ===" -ForegroundColor Yellow
-    $exitCode = 0
+$bootPassed = $serialLog.Count -gt 0 -or $vmState -eq 'Running'
+if ($bootPassed) {
+    Write-Host "Boot: PASSED (captured $($serialLog.Count) serial lines)" -ForegroundColor Green
 } else {
-    Write-Host "VM state: $vmState" -ForegroundColor Yellow
-    Write-Host "=== BOOT TEST INCONCLUSIVE ===" -ForegroundColor Yellow
-    $exitCode = 2
+    Write-Host "Boot: INCONCLUSIVE (VM state: $vmState)" -ForegroundColor Yellow
 }
+if ($tcpPassed) {
+    Write-Host "TCP:  PASSED" -ForegroundColor Green
+} else {
+    Write-Host "TCP:  SKIPPED or FAILED" -ForegroundColor Yellow
+}
+$exitCode = if ($bootPassed) { 0 } else { 2 }
 
 # Cleanup
 Write-Host ""
-Write-Host "Cleaning up..."
+Write-Host 'Cleaning up...'
 Remove-VM -Name $VMName -Force -ErrorAction SilentlyContinue
 Remove-Item $localIso -Force -ErrorAction SilentlyContinue
 

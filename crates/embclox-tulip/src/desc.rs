@@ -50,6 +50,10 @@ pub const TDES1_LS: u32 = 1 << 30; // Last Segment
 pub const TDES1_TER: u32 = 1 << 25; // TX End of Ring
 pub const TDES1_TCH: u32 = 1 << 24; // TX Chained
 pub const TDES1_IC: u32 = 1 << 31; // Interrupt on Completion
+pub const TDES1_SET: u32 = 1 << 27; // Setup Packet
+
+/// Setup frame size (192 bytes = 16 perfect filter entries × 12 bytes).
+pub const SETUP_FRAME_SIZE: usize = 192;
 
 // RX control bits
 pub const RDES1_RER: u32 = 1 << 25; // RX End of Ring

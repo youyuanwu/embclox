@@ -117,14 +117,11 @@ impl<D: DmaAllocator> TulipDevice<D> {
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
         );
 
-        // Enable TX + RX, promiscuous mode, store-and-forward
-        // CSR6: SR=1, ST=1, PR=1 (promiscuous), SF=1 (store and forward)
-        unsafe { csr.write(CSR6, CSR6_SR | CSR6_ST | (1 << 6) | (1 << 21)) };
-        unsafe { csr.write(CSR2, 1) };
+        // Enable TX only first (need to send setup frame before RX works)
+        // CSR6: ST=1, PR=1 (promiscuous), SF=1 (store and forward)
+        unsafe { csr.write(CSR6, CSR6_ST | (1 << 6) | (1 << 21)) };
 
-        info!("Tulip: device initialized");
-
-        TulipDevice {
+        let mut dev = TulipDevice {
             csr,
             dma,
             tx_ring_dma,
@@ -134,7 +131,98 @@ impl<D: DmaAllocator> TulipDevice<D> {
             tx_next: 0,
             rx_next: 0,
             mac,
+        };
+
+        // Send setup frame to program the receive address filter.
+        // Required by the 21140 — without this, Hyper-V won't pass frames.
+        dev.send_setup_frame();
+
+        // Now enable RX
+        let csr6 = unsafe { dev.csr.read(CSR6) };
+        unsafe { dev.csr.write(CSR6, csr6 | CSR6_SR) };
+        unsafe { dev.csr.write(CSR2, 1) }; // RX poll demand
+
+        info!("Tulip: device initialized");
+        dev
+    }
+
+    /// Send a perfect-filter setup frame (192 bytes).
+    /// Programs the NIC's MAC address filter with our MAC + broadcast.
+    fn send_setup_frame(&mut self) {
+        let desc_ptr = (self.tx_ring_dma.vaddr + self.tx_next * 16) as *mut u32;
+
+        // Wait for descriptor to be available
+        fence(Ordering::Acquire);
+        let status = unsafe { core::ptr::read_volatile(desc_ptr) };
+        assert!(
+            status & DESC_OWN == 0,
+            "TX descriptor not available for setup frame"
+        );
+
+        // Build 192-byte setup frame in the TX buffer.
+        // Perfect filtering mode: 16 entries × 12 bytes.
+        // Each entry is 3 × 4 bytes: [addr0|addr1, pad, addr2|addr3, pad, addr4|addr5, pad]
+        let buf_vaddr = self.tx_bufs_dma.vaddr + self.tx_next * MBUF_SIZE;
+        let buf =
+            unsafe { core::slice::from_raw_parts_mut(buf_vaddr as *mut u8, SETUP_FRAME_SIZE) };
+
+        // Fill all 16 entries with broadcast first
+        for entry in 0..16 {
+            let off = entry * 12;
+            // Each entry: bytes [0..1] = addr[0..1], [2..3] = pad
+            //             bytes [4..5] = addr[2..3], [6..7] = pad
+            //             bytes [8..9] = addr[4..5], [10..11] = pad
+            buf[off] = 0xFF;
+            buf[off + 1] = 0xFF;
+            buf[off + 2] = 0xFF; // pad
+            buf[off + 3] = 0xFF; // pad
+            buf[off + 4] = 0xFF;
+            buf[off + 5] = 0xFF;
+            buf[off + 6] = 0xFF; // pad
+            buf[off + 7] = 0xFF; // pad
+            buf[off + 8] = 0xFF;
+            buf[off + 9] = 0xFF;
+            buf[off + 10] = 0xFF; // pad
+            buf[off + 11] = 0xFF; // pad
         }
+
+        // Entry 0: our MAC address
+        buf[0] = self.mac[0];
+        buf[1] = self.mac[1];
+        buf[4] = self.mac[2];
+        buf[5] = self.mac[3];
+        buf[8] = self.mac[4];
+        buf[9] = self.mac[5];
+
+        fence(Ordering::Release);
+
+        // Setup frame descriptor: SET bit + size 192
+        let mut ctrl = TDES1_SET | (SETUP_FRAME_SIZE as u32 & 0x7FF);
+        if self.tx_next == TX_RING_SIZE - 1 {
+            ctrl |= TDES1_TER;
+        }
+        unsafe {
+            core::ptr::write_volatile(desc_ptr.add(1), ctrl);
+            fence(Ordering::Release);
+            core::ptr::write_volatile(desc_ptr, DESC_OWN);
+        }
+
+        // Kick TX
+        unsafe { self.csr.write(CSR1, 1) };
+
+        // Wait for setup frame to complete
+        for _ in 0..100_000u32 {
+            fence(Ordering::Acquire);
+            let s = unsafe { core::ptr::read_volatile(desc_ptr) };
+            if s & DESC_OWN == 0 {
+                info!("Tulip: setup frame sent");
+                self.tx_next = (self.tx_next + 1) % TX_RING_SIZE;
+                return;
+            }
+            core::hint::spin_loop();
+        }
+        warn!("Tulip: setup frame timeout");
+        self.tx_next = (self.tx_next + 1) % TX_RING_SIZE;
     }
 
     pub fn mac(&self) -> [u8; 6] {

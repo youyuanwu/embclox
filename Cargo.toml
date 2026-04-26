@@ -30,7 +30,7 @@ default-members = [
 [workspace.dependencies]
 # Embassy ecosystem
 embassy-executor = { version = "0.10", features = ["platform-spin", "executor-thread"] }
-embassy-net = { version = "0.9", features = ["tcp", "udp", "medium-ethernet", "proto-ipv4", "log"] }
+embassy-net = { version = "0.9", features = ["tcp", "udp", "medium-ethernet", "proto-ipv4", "dhcpv4", "log"] }
 embassy-net-driver = "0.2"
 embassy-time = { version = "0.5", features = ["tick-hz-1_000_000"] }
 embassy-time-driver = "0.2"

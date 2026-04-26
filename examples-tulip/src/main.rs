@@ -10,7 +10,7 @@ mod tulip_embassy;
 
 use core::arch::asm;
 use core::fmt::Write;
-use embassy_net::{Ipv4Address, Ipv4Cidr, Stack, StackResources, StaticConfigV4};
+use embassy_net::{Stack, StackResources};
 use embclox_dma::{DmaAllocator, DmaRegion};
 use embedded_io_async::Write as AsyncWrite;
 use limine::BaseRevision;
@@ -416,11 +416,7 @@ unsafe extern "C" fn kmain() -> ! {
     // --- Embassy networking ---
     let driver = crate::tulip_embassy::TulipEmbassy::new(device, mac);
 
-    let config = embassy_net::Config::ipv4_static(StaticConfigV4 {
-        address: Ipv4Cidr::new(Ipv4Address::new(10, 0, 2, 15), 24),
-        gateway: Some(Ipv4Address::new(10, 0, 2, 2)),
-        dns_servers: Default::default(),
-    });
+    let config = embassy_net::Config::dhcpv4(Default::default());
 
     static RESOURCES: StaticCell<StackResources<5>> = StaticCell::new();
     let resources = RESOURCES.init(StackResources::new());
@@ -442,7 +438,6 @@ unsafe extern "C" fn kmain() -> ! {
     loop {
         unsafe { executor.poll() };
         time::check_alarms();
-        // No IOAPIC — poll-wake the network driver manually
         crate::tulip_embassy::TULIP_WAKER.wake();
         core::hint::spin_loop();
     }
@@ -494,6 +489,17 @@ async fn net_task(
 
 #[embassy_executor::task]
 async fn echo_task(stack: &'static Stack<'static>) {
+    // Wait for DHCP to assign an IP
+    loop {
+        if let Some(config) = stack.config_v4() {
+            let mut serial = SerialPort::new(0x3F8);
+            let addr = config.address;
+            let _ = writeln!(serial, "DHCP assigned: {}", addr);
+            break;
+        }
+        embassy_time::Timer::after_millis(100).await;
+    }
+
     let mut buf = [0u8; 1024];
     loop {
         let mut tx_buf = [0u8; 1024];
