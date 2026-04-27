@@ -194,13 +194,14 @@ crates/embclox-hyperv/src/
   ├── rndis.rs             NEW — RNDIS messages, OID queries
   └── netvsc.rs            NEW — NetVSC device (send/recv frames)
 
-crates/embclox-core/src/
-  └── netvsc_embassy.rs    NEW — Embassy Driver adapter
+examples-hyperv/src/
+  └── netvsc_embassy.rs    NEW — Embassy Driver adapter + waker
 ```
 
 NetVSC lives inside `embclox-hyperv` (not a separate crate) because it
-shares VMBus channel/ring internals. The Embassy adapter goes in
-`embclox-core` alongside `e1000_embassy.rs` and `tulip_embassy.rs`.
+shares VMBus channel/ring internals. The Embassy adapter goes in the
+hyperv example alongside the Limine boot code, following the same
+pattern as `examples-tulip/src/tulip_embassy.rs`.
 
 ## Memory budget
 

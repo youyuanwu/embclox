@@ -200,6 +200,7 @@ impl RingHalf {
         // Read descriptor
         let mut desc_bytes = [0u8; 16];
         let pos = unsafe { self.copy_from(read_idx, &mut desc_bytes) };
+
         let desc =
             unsafe { core::ptr::read_unaligned(desc_bytes.as_ptr() as *const VmPacketDescriptor) };
 

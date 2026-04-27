@@ -188,6 +188,10 @@ unsafe extern "C" fn kmain() -> ! {
 
     writeln!(serial, "embclox Hyper-V example booting via Limine...").ok();
 
+    // Set up HAL serial logger so log::info! works inside crate code
+    let hal_serial = embclox_hal_x86::serial::Serial::new(0x3F8);
+    embclox_hal_x86::serial::init_global(hal_serial);
+
     assert!(BASE_REVISION.is_supported());
     writeln!(serial, "Limine base revision: supported").ok();
 
@@ -270,7 +274,7 @@ unsafe extern "C" fn kmain() -> ! {
             let mut memory = embclox_hal_x86::memory::MemoryMapper::new(hhdm_offset, kernel_offset);
 
             match embclox_hyperv::init(&dma, &mut memory) {
-                Ok(vmbus) => {
+                Ok(mut vmbus) => {
                     writeln!(
                         serial,
                         "VMBus initialized: version={:#x}, {} channel offers",
@@ -296,6 +300,23 @@ unsafe extern "C" fn kmain() -> ! {
                     }
 
                     writeln!(serial, "VMBUS INIT PASSED").ok();
+
+                    // --- NetVSC init ---
+                    writeln!(serial, "Starting NetVSC init...").ok();
+                    match embclox_hyperv::netvsc::NetvscDevice::init(&mut vmbus, &dma, &memory) {
+                        Ok(netvsc) => {
+                            writeln!(
+                                serial,
+                                "NETVSC INIT PASSED: MAC={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x} MTU={}",
+                                netvsc.mac()[0], netvsc.mac()[1], netvsc.mac()[2],
+                                netvsc.mac()[3], netvsc.mac()[4], netvsc.mac()[5],
+                                netvsc.mtu(),
+                            ).ok();
+                        }
+                        Err(e) => {
+                            writeln!(serial, "NetVSC init failed: {}", e).ok();
+                        }
+                    }
                 }
                 Err(e) => {
                     writeln!(serial, "VMBus init failed: {}", e).ok();

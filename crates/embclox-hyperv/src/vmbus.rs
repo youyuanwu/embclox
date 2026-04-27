@@ -291,19 +291,25 @@ pub(crate) fn request_offers(
 
 /// Parse an OFFERCHANNEL message payload into a ChannelOffer.
 ///
-/// Layout (packed, 192 bytes):
+/// Layout (packed, 196 bytes):
 ///   0..8:   header (msgtype + padding)
 ///   8..24:  if_type GUID (16 bytes)
 ///   24..40: if_instance GUID (16 bytes)
-///   40..60: int_latency(8) + if_revision(4) + server_ctx_size(4) + flags(4)
-///   60..180: user_def / sub_channel info (120 bytes)
-///   180..184: child_relid (u32)
-///   184: monitorid (u8)
-///   185: monitor_allocated (u8)
-///   186..188: is_dedicated_interrupt (u16)
-///   188..192: connection_id (u32)
+///   40..48: int_latency (8 bytes)
+///   48..52: if_revision (4 bytes)
+///   52..56: server_ctx_area_size (4 bytes)
+///   56..58: chn_flags (2 bytes)
+///   58..60: mmio_megabytes (2 bytes)
+///   60..62: sub_channel_index (2 bytes)
+///   62..64: mmio_megabytes_optional2 (2 bytes)
+///   64..184: user_def (120 bytes)
+///   184..188: child_relid (u32)
+///   188: monitorid (u8)
+///   189: monitor_allocated (u8)
+///   190..192: is_dedicated_interrupt (u16)
+///   192..196: connection_id (u32)
 fn parse_offer(payload: &[u8]) -> Option<ChannelOffer> {
-    if payload.len() < 192 {
+    if payload.len() < 196 {
         return None;
     }
 
@@ -313,11 +319,11 @@ fn parse_offer(payload: &[u8]) -> Option<ChannelOffer> {
     let mut if_instance = [0u8; 16];
     if_instance.copy_from_slice(&payload[24..40]);
 
-    let child_relid = u32::from_le_bytes(payload[180..184].try_into().unwrap());
-    let monitor_id = payload[184];
-    let monitor_allocated = payload[185] != 0;
-    let is_dedicated_interrupt = u16::from_le_bytes(payload[186..188].try_into().unwrap());
-    let connection_id = u32::from_le_bytes(payload[188..192].try_into().unwrap());
+    let child_relid = u32::from_le_bytes(payload[184..188].try_into().unwrap());
+    let monitor_id = payload[188];
+    let monitor_allocated = payload[189] != 0;
+    let is_dedicated_interrupt = u16::from_le_bytes(payload[190..192].try_into().unwrap());
+    let connection_id = u32::from_le_bytes(payload[192..196].try_into().unwrap());
 
     Some(ChannelOffer {
         device_type: Guid::from_bytes(if_type),

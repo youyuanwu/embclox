@@ -13,6 +13,7 @@ pub mod detect;
 pub mod guid;
 pub mod hypercall;
 mod msr;
+pub mod netvsc;
 pub mod ring;
 pub mod synic;
 pub mod synthvid;

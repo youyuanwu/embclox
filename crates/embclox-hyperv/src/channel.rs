@@ -24,7 +24,7 @@ const VMBUS_MESSAGE_TYPE_CHANNEL: u32 = 1;
 /// Next GPADL handle (monotonically increasing).
 static NEXT_GPADL: AtomicU32 = AtomicU32::new(1);
 
-fn alloc_gpadl_handle() -> u32 {
+pub(crate) fn alloc_gpadl_handle() -> u32 {
     NEXT_GPADL.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
 }
 
@@ -212,7 +212,7 @@ fn build_pfn_list(
 
 /// Create a GPADL by sending GPADL_HEADER (+ GPADL_BODY if needed) and
 /// waiting for GPADL_CREATED.
-fn create_gpadl(
+pub(crate) fn create_gpadl(
     child_relid: u32,
     gpadl_handle: u32,
     byte_count: usize,
