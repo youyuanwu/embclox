@@ -33,8 +33,8 @@ jobs:
       - name: Clippy workspace
         run: cargo clippy -- -D warnings
 
-      - name: Clippy example
-        working-directory: examples
+      - name: Clippy e1000 example
+        working-directory: examples-e1000
         run: cargo clippy -- -D warnings
 
       - name: Clippy unit tests
@@ -47,7 +47,7 @@ jobs:
 
       - name: Build disk images
         run: |
-          cargo build --manifest-path examples/Cargo.toml --target x86_64-unknown-none
+          cargo build --manifest-path examples-e1000/Cargo.toml --target x86_64-unknown-none
           cargo build --manifest-path qemu-tests/unit/Cargo.toml --target x86_64-unknown-none
           cargo run -p embclox-mkimage -- target/x86_64-unknown-none/debug/embclox-example target/x86_64-unknown-none/debug/embclox-example.img
           cargo run -p embclox-mkimage -- target/x86_64-unknown-none/debug/embclox-unit-tests target/x86_64-unknown-none/debug/embclox-unit-tests.img
