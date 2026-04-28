@@ -20,6 +20,11 @@ pub const VMBUS_VECTOR: u8 = 34;
 
 #[allow(dead_code)]
 /// Read a Model-Specific Register.
+///
+/// # Safety
+/// Caller must ensure `reg` is a valid MSR available on the current CPU.
+/// Reading invalid or privileged MSRs from non-ring-0 code triggers a
+/// general-protection fault.
 #[inline]
 pub unsafe fn rdmsr(reg: u32) -> u64 {
     let low: u32;
@@ -35,6 +40,12 @@ pub unsafe fn rdmsr(reg: u32) -> u64 {
 }
 
 /// Write a Model-Specific Register.
+///
+/// # Safety
+/// Caller must ensure `reg` is writable on the current CPU and that
+/// `value` is meaningful for the target MSR. Writing to MSRs can change
+/// privileged CPU state (paging, interrupt delivery, hypervisor
+/// interface) — incorrect values may crash the system.
 #[inline]
 pub unsafe fn wrmsr(reg: u32, value: u64) {
     let low = value as u32;
@@ -52,6 +63,11 @@ pub unsafe fn wrmsr(reg: u32, value: u64) {
 ///
 /// Must be called before enabling the hypercall page. A non-zero
 /// Guest OS ID is required by the hypervisor.
+///
+/// # Safety
+/// Must run with CPL=0 (kernel mode). The hypervisor uses this value to
+/// decide which interface to expose; setting it after other Hyper-V MSRs
+/// have been initialised may invalidate them.
 pub unsafe fn set_guest_os_id() {
     // Bit 63: open source OS
     // Bits 55:48: vendor = 0x01

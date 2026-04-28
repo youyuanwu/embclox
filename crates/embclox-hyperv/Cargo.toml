@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 embclox-dma.workspace = true
 embclox-hal-x86.workspace = true
+embassy-sync.workspace = true
 log.workspace = true
 
 [build-dependencies]

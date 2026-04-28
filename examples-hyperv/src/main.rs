@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![feature(abi_x86_interrupt)]
 
 extern crate alloc;
 
@@ -263,6 +264,32 @@ fn ipv4_checksum(header: &[u8]) -> u16 {
     !(sum as u16)
 }
 
+/// IDT for the Hyper-V example. We only install one entry — the SynIC SINT2
+/// vector that VMBus uses for synthetic interrupts (see
+/// `embclox_hyperv::msr::VMBUS_VECTOR`).
+fn setup_idt() {
+    use x86_64::structures::idt::InterruptDescriptorTable;
+    static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
+    unsafe {
+        let idt = &raw mut IDT;
+        (&mut *idt)[embclox_hyperv::msr::VMBUS_VECTOR].set_handler_fn(vmbus_isr);
+        (&*idt).load();
+    }
+}
+
+/// Counter incremented every time the SynIC SINT2 ISR fires. Useful for
+/// verifying that interrupts are actually being delivered.
+static VMBUS_IRQ_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// SynIC SINT2 → VMBus IDT vector handler.
+///
+/// We only wake the netvsc waker — the SINT MSR is configured with auto-EOI
+/// (bit 17), so no explicit LAPIC EOI write is required.
+extern "x86-interrupt" fn vmbus_isr(_frame: x86_64::structures::idt::InterruptStackFrame) {
+    VMBUS_IRQ_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    embclox_hyperv::netvsc::NETVSC_WAKER.wake();
+}
+
 /// Phase 3 NetVSC smoke test: send a gratuitous ARP and dump any received
 /// Ethernet frames. Verifies the RNDIS_PACKET_MSG TX and RX paths end-to-end
 /// against the host vSwitch.
@@ -272,7 +299,7 @@ fn phase3_smoke_test(
     mac: [u8; 6],
 ) {
     // Crank up logging while we exercise the data path so we can see every
-    // VMBus packet pass through poll_channel/try_receive.
+    // VMBus packet pass through pump_channel/try_receive.
     log::set_max_level(log::LevelFilter::Trace);
     // 1) Gratuitous ARP for 169.254.42.42
     writeln!(serial, "PHASE3: building gratuitous ARP for 169.254.42.42").ok();
@@ -295,82 +322,94 @@ fn phase3_smoke_test(
     arp_frame[38..42].copy_from_slice(&our_ip);
     // bytes 42..60 stay zero (Ethernet pad)
 
-    if let Err(e) = netvsc.transmit(&arp_frame) {
-        writeln!(serial, "PHASE3: ARP transmit failed: {}", e).ok();
+    // Send the gratuitous ARP via the new closure-based API to exercise
+    // `transmit_with` end-to-end.
+    let arp_len = arp_frame.len();
+    if let Err(e) = netvsc.transmit_with(arp_len, |buf| buf.copy_from_slice(&arp_frame)) {
+        writeln!(serial, "PHASE3: ARP transmit_with failed: {}", e).ok();
         return;
     }
     writeln!(
         serial,
-        "PHASE3: gratuitous ARP sent ({} bytes)",
-        arp_frame.len()
+        "PHASE3: gratuitous ARP sent via transmit_with ({} bytes)",
+        arp_len
     )
     .ok();
 
     // 2) DHCP DISCOVER — Default Switch runs a DHCP server, this should
-    //    elicit an OFFER.
+    //    elicit an OFFER. Wait for TX space first to demonstrate the
+    //    has_tx_space + transmit_with split.
     let xid: u32 = 0xdeadbeef;
     let dhcp_frame = build_dhcp_discover(mac, xid);
-    if let Err(e) = netvsc.transmit(&dhcp_frame) {
-        writeln!(serial, "PHASE3: DHCP transmit failed: {}", e).ok();
+
+    // Spin briefly until the previous TX completion lands so we can reuse
+    // the send-buffer slot. In Phase 4b an embassy task would simply yield
+    // here and be re-polled when the SINT2 ISR wakes the waker.
+    for _ in 0..1_000_000u64 {
+        if netvsc.has_tx_space() {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    if !netvsc.has_tx_space() {
+        writeln!(serial, "PHASE3: timed out waiting for TX space after ARP").ok();
+        return;
+    }
+
+    if let Err(e) = netvsc.transmit_with(dhcp_frame.len(), |buf| buf.copy_from_slice(&dhcp_frame)) {
+        writeln!(serial, "PHASE3: DHCP transmit_with failed: {}", e).ok();
         return;
     }
     writeln!(
         serial,
-        "PHASE3: DHCP DISCOVER sent ({} bytes, xid={:#x})",
+        "PHASE3: DHCP DISCOVER sent via transmit_with ({} bytes, xid={:#x})",
         dhcp_frame.len(),
         xid
     )
     .ok();
 
-    // 3) Drain RX. Loop until we see ~8 frames or run out of iterations.
-    //    Each iteration is dominated by the inner spin (~2.5us on Hyper-V),
-    //    so 6M iterations is roughly 15 seconds of wall-clock wait.
-    let mut rx_buf = [0u8; 2048];
+    // 3) Drain RX via the new has_rx_packet + recv_with API. The poll loop
+    //    is bounded; in Phase 4b an embassy task would `await` instead.
     let mut frames_seen = 0u32;
     let mut dhcp_offer_seen = false;
     for i in 0..6_000_000u64 {
-        match netvsc.try_receive(&mut rx_buf) {
-            Ok(Some(n)) => {
+        if netvsc.has_rx_packet() {
+            let result = netvsc.recv_with(|frame| {
                 frames_seen += 1;
+                let n = frame.len();
                 let dump_len = n.min(48);
                 writeln!(
                     serial,
                     "PHASE3: rx frame #{} len={} bytes={:02x?}",
                     frames_seen,
                     n,
-                    &rx_buf[..dump_len]
+                    &frame[..dump_len]
                 )
                 .ok();
-                // Look for a UDP packet from port 67 (DHCP server) addressed
-                // to our MAC or broadcast — that's our DHCP OFFER.
-                if n >= 42
-                    && rx_buf[12..14] == [0x08, 0x00]
-                    && rx_buf[23] == 17
-                    && rx_buf[34..36] == [0x00, 0x43]
-                {
-                    dhcp_offer_seen = true;
-                    writeln!(serial, "PHASE3: DHCP reply detected").ok();
-                }
-                if frames_seen >= 8 {
-                    break;
-                }
+                n >= 42
+                    && frame[12..14] == [0x08, 0x00]
+                    && frame[23] == 17
+                    && frame[34..36] == [0x00, 0x43]
+            });
+            if result == Some(true) {
+                dhcp_offer_seen = true;
+                writeln!(serial, "PHASE3: DHCP reply detected").ok();
             }
-            Ok(None) => {
-                for _ in 0..100 {
-                    core::hint::spin_loop();
-                }
-            }
-            Err(e) => {
-                writeln!(serial, "PHASE3: try_receive error: {}", e).ok();
+            if frames_seen >= 8 {
                 break;
+            }
+        } else {
+            for _ in 0..100 {
+                core::hint::spin_loop();
             }
         }
         if i > 0 && i.is_multiple_of(2_000_000) {
             writeln!(
                 serial,
-                "PHASE3: still polling (iter {}M, rx={})",
+                "PHASE3: still polling (iter {}M, rx={}, irq_count={})",
                 i / 1_000_000,
-                frames_seen
+                frames_seen,
+                VMBUS_IRQ_COUNT.load(core::sync::atomic::Ordering::Relaxed)
             )
             .ok();
         }
@@ -381,8 +420,10 @@ fn phase3_smoke_test(
     }
     writeln!(
         serial,
-        "PHASE3 SMOKE TEST DONE: rx={} dhcp_reply={}",
-        frames_seen, dhcp_offer_seen
+        "PHASE3 SMOKE TEST DONE: rx={} dhcp_reply={} vmbus_irq_count={}",
+        frames_seen,
+        dhcp_offer_seen,
+        VMBUS_IRQ_COUNT.load(core::sync::atomic::Ordering::Relaxed)
     )
     .ok();
 }
@@ -519,6 +560,16 @@ unsafe extern "C" fn kmain() -> ! {
                                 mac[3], mac[4], mac[5],
                                 netvsc.mtu(),
                             ).ok();
+
+                            // --- Phase 4a: install IDT + enable SynIC SINT2 ISR ---
+                            setup_idt();
+                            x86_64::instructions::interrupts::enable();
+                            writeln!(
+                                serial,
+                                "IDT installed, interrupts enabled (SINT2 vector {})",
+                                embclox_hyperv::msr::VMBUS_VECTOR
+                            )
+                            .ok();
 
                             // --- Phase 3: TX/RX smoke test ---
                             phase3_smoke_test(&mut serial, &mut netvsc, mac);
