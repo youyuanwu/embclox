@@ -6,12 +6,16 @@ extern crate alloc;
 
 use core::arch::asm;
 use core::fmt::Write;
+use embassy_net::{Stack, StackResources};
 use embclox_dma::{DmaAllocator, DmaRegion};
+use embclox_hyperv::netvsc_embassy::NetvscEmbassy;
+use embedded_io_async::Write as AsyncWrite;
 use limine::BaseRevision;
 use limine::request::{
     FramebufferRequest, HhdmRequest, MemoryMapRequest, RequestsEndMarker, RequestsStartMarker,
     StackSizeRequest,
 };
+use static_cell::StaticCell;
 use x86_64::VirtAddr;
 use x86_64::structures::paging::Translate;
 
@@ -182,88 +186,6 @@ impl DmaAllocator for LimineDmaAllocator {
     }
 }
 
-/// Build a minimal DHCP DISCOVER packet (Ethernet + IPv4 + UDP + DHCP).
-/// Total size is exactly 300 bytes (well above the 60-byte Ethernet minimum).
-fn build_dhcp_discover(mac: [u8; 6], xid: u32) -> [u8; 300] {
-    let mut frame = [0u8; 300];
-
-    // Ethernet header: dst=broadcast, src=our MAC, type=IPv4
-    frame[0..6].copy_from_slice(&[0xff; 6]);
-    frame[6..12].copy_from_slice(&mac);
-    frame[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
-
-    // IPv4 header (20 bytes): src=0.0.0.0, dst=255.255.255.255, proto=UDP
-    let ip_total = (300u16 - 14).to_be_bytes(); // 286
-    frame[14] = 0x45; // version=4, IHL=5
-    frame[15] = 0x00; // DSCP/ECN
-    frame[16..18].copy_from_slice(&ip_total);
-    frame[18..20].copy_from_slice(&0u16.to_be_bytes()); // ID
-    frame[20..22].copy_from_slice(&0x4000u16.to_be_bytes()); // flags=DF, frag=0
-    frame[22] = 64; // TTL
-    frame[23] = 17; // proto=UDP
-    // checksum at 24..26 (filled below)
-    frame[26..30].copy_from_slice(&[0, 0, 0, 0]); // src IP
-    frame[30..34].copy_from_slice(&[255, 255, 255, 255]); // dst IP
-    let ip_csum = ipv4_checksum(&frame[14..34]);
-    frame[24..26].copy_from_slice(&ip_csum.to_be_bytes());
-
-    // UDP header (8 bytes): src=68 (client), dst=67 (server)
-    let udp_total = (300u16 - 14 - 20).to_be_bytes(); // 266
-    frame[34..36].copy_from_slice(&68u16.to_be_bytes());
-    frame[36..38].copy_from_slice(&67u16.to_be_bytes());
-    frame[38..40].copy_from_slice(&udp_total);
-    // UDP checksum (38..40 ... wait, that's length). UDP checksum is at 40..42.
-    frame[40..42].copy_from_slice(&0u16.to_be_bytes()); // checksum=0 (optional for IPv4)
-
-    // DHCP message (BOOTREQUEST). DHCP body starts at frame offset 42
-    // (14 Ethernet + 20 IPv4 + 8 UDP). The fixed BOOTP header is 236 bytes,
-    // so the magic cookie sits at frame offset 42 + 236 = 278.
-    frame[42] = 1; // op=BOOTREQUEST
-    frame[43] = 1; // htype=Ethernet
-    frame[44] = 6; // hlen
-    frame[45] = 0; // hops
-    frame[46..50].copy_from_slice(&xid.to_be_bytes()); // xid
-    frame[50..52].copy_from_slice(&0u16.to_be_bytes()); // secs
-    frame[52..54].copy_from_slice(&0x8000u16.to_be_bytes()); // flags=BROADCAST
-    // ciaddr (54..58), yiaddr (58..62), siaddr (62..66), giaddr (66..70) = 0
-    // chaddr at frame 70..86 (16 bytes; first 6 = our MAC)
-    frame[70..76].copy_from_slice(&mac);
-    // sname (86..150) + file (150..278) zeroed
-
-    // Magic cookie at frame[278..282]
-    frame[278..282].copy_from_slice(&[0x63, 0x82, 0x53, 0x63]);
-    // DHCP options (start at frame[282])
-    let opt = 282;
-    // Option 53: DHCP Message Type = 1 (DISCOVER)
-    frame[opt] = 53;
-    frame[opt + 1] = 1;
-    frame[opt + 2] = 1; // DISCOVER
-    // Option 55: Parameter Request List (subnet mask, router, DNS)
-    frame[opt + 3] = 55;
-    frame[opt + 4] = 3;
-    frame[opt + 5] = 1; // subnet mask
-    frame[opt + 6] = 3; // router
-    frame[opt + 7] = 6; // DNS
-    // End option
-    frame[opt + 8] = 0xff;
-
-    frame
-}
-
-/// Compute IPv4 header checksum (one's complement sum of 16-bit words).
-fn ipv4_checksum(header: &[u8]) -> u16 {
-    let mut sum: u32 = 0;
-    let mut i = 0;
-    while i + 1 < header.len() {
-        sum += u16::from_be_bytes([header[i], header[i + 1]]) as u32;
-        i += 2;
-    }
-    while sum >> 16 != 0 {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    !(sum as u16)
-}
-
 /// IDT for the Hyper-V example. We only install one entry — the SynIC SINT2
 /// vector that VMBus uses for synthetic interrupts (see
 /// `embclox_hyperv::msr::VMBUS_VECTOR`).
@@ -288,144 +210,6 @@ static VMBUS_IRQ_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::Atom
 extern "x86-interrupt" fn vmbus_isr(_frame: x86_64::structures::idt::InterruptStackFrame) {
     VMBUS_IRQ_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     embclox_hyperv::netvsc::NETVSC_WAKER.wake();
-}
-
-/// Phase 3 NetVSC smoke test: send a gratuitous ARP and dump any received
-/// Ethernet frames. Verifies the RNDIS_PACKET_MSG TX and RX paths end-to-end
-/// against the host vSwitch.
-fn phase3_smoke_test(
-    serial: &mut SerialPort,
-    netvsc: &mut embclox_hyperv::netvsc::NetvscDevice,
-    mac: [u8; 6],
-) {
-    // Crank up logging while we exercise the data path so we can see every
-    // VMBus packet pass through pump_channel/try_receive.
-    log::set_max_level(log::LevelFilter::Trace);
-    // 1) Gratuitous ARP for 169.254.42.42
-    writeln!(serial, "PHASE3: building gratuitous ARP for 169.254.42.42").ok();
-    // Pad to Ethernet minimum (60 bytes) — some switches drop runts.
-    let mut arp_frame = [0u8; 60];
-
-    arp_frame[0..6].copy_from_slice(&[0xff; 6]);
-    arp_frame[6..12].copy_from_slice(&mac);
-    arp_frame[12..14].copy_from_slice(&0x0806u16.to_be_bytes());
-
-    let our_ip: [u8; 4] = [169, 254, 42, 42];
-    arp_frame[14..16].copy_from_slice(&1u16.to_be_bytes()); // HTYPE=Ethernet
-    arp_frame[16..18].copy_from_slice(&0x0800u16.to_be_bytes()); // PTYPE=IPv4
-    arp_frame[18] = 6; // HLEN
-    arp_frame[19] = 4; // PLEN
-    arp_frame[20..22].copy_from_slice(&1u16.to_be_bytes()); // OPER=request
-    arp_frame[22..28].copy_from_slice(&mac);
-    arp_frame[28..32].copy_from_slice(&our_ip);
-    arp_frame[32..38].copy_from_slice(&[0; 6]);
-    arp_frame[38..42].copy_from_slice(&our_ip);
-    // bytes 42..60 stay zero (Ethernet pad)
-
-    // Send the gratuitous ARP via the new closure-based API to exercise
-    // `transmit_with` end-to-end.
-    let arp_len = arp_frame.len();
-    if let Err(e) = netvsc.transmit_with(arp_len, |buf| buf.copy_from_slice(&arp_frame)) {
-        writeln!(serial, "PHASE3: ARP transmit_with failed: {}", e).ok();
-        return;
-    }
-    writeln!(
-        serial,
-        "PHASE3: gratuitous ARP sent via transmit_with ({} bytes)",
-        arp_len
-    )
-    .ok();
-
-    // 2) DHCP DISCOVER — Default Switch runs a DHCP server, this should
-    //    elicit an OFFER. Wait for TX space first to demonstrate the
-    //    has_tx_space + transmit_with split.
-    let xid: u32 = 0xdeadbeef;
-    let dhcp_frame = build_dhcp_discover(mac, xid);
-
-    // Spin briefly until the previous TX completion lands so we can reuse
-    // the send-buffer slot. In Phase 4b an embassy task would simply yield
-    // here and be re-polled when the SINT2 ISR wakes the waker.
-    for _ in 0..1_000_000u64 {
-        if netvsc.has_tx_space() {
-            break;
-        }
-        core::hint::spin_loop();
-    }
-    if !netvsc.has_tx_space() {
-        writeln!(serial, "PHASE3: timed out waiting for TX space after ARP").ok();
-        return;
-    }
-
-    if let Err(e) = netvsc.transmit_with(dhcp_frame.len(), |buf| buf.copy_from_slice(&dhcp_frame)) {
-        writeln!(serial, "PHASE3: DHCP transmit_with failed: {}", e).ok();
-        return;
-    }
-    writeln!(
-        serial,
-        "PHASE3: DHCP DISCOVER sent via transmit_with ({} bytes, xid={:#x})",
-        dhcp_frame.len(),
-        xid
-    )
-    .ok();
-
-    // 3) Drain RX via the new has_rx_packet + recv_with API. The poll loop
-    //    is bounded; in Phase 4b an embassy task would `await` instead.
-    let mut frames_seen = 0u32;
-    let mut dhcp_offer_seen = false;
-    for i in 0..6_000_000u64 {
-        if netvsc.has_rx_packet() {
-            let result = netvsc.recv_with(|frame| {
-                frames_seen += 1;
-                let n = frame.len();
-                let dump_len = n.min(48);
-                writeln!(
-                    serial,
-                    "PHASE3: rx frame #{} len={} bytes={:02x?}",
-                    frames_seen,
-                    n,
-                    &frame[..dump_len]
-                )
-                .ok();
-                n >= 42
-                    && frame[12..14] == [0x08, 0x00]
-                    && frame[23] == 17
-                    && frame[34..36] == [0x00, 0x43]
-            });
-            if result == Some(true) {
-                dhcp_offer_seen = true;
-                writeln!(serial, "PHASE3: DHCP reply detected").ok();
-            }
-            if frames_seen >= 8 {
-                break;
-            }
-        } else {
-            for _ in 0..100 {
-                core::hint::spin_loop();
-            }
-        }
-        if i > 0 && i.is_multiple_of(2_000_000) {
-            writeln!(
-                serial,
-                "PHASE3: still polling (iter {}M, rx={}, irq_count={})",
-                i / 1_000_000,
-                frames_seen,
-                VMBUS_IRQ_COUNT.load(core::sync::atomic::Ordering::Relaxed)
-            )
-            .ok();
-        }
-    }
-
-    if frames_seen == 0 {
-        writeln!(serial, "PHASE3: no frames received").ok();
-    }
-    writeln!(
-        serial,
-        "PHASE3 SMOKE TEST DONE: rx={} dhcp_reply={} vmbus_irq_count={}",
-        frames_seen,
-        dhcp_offer_seen,
-        VMBUS_IRQ_COUNT.load(core::sync::atomic::Ordering::Relaxed)
-    )
-    .ok();
 }
 
 #[unsafe(no_mangle)]
@@ -551,7 +335,7 @@ unsafe extern "C" fn kmain() -> ! {
                     // --- NetVSC init ---
                     writeln!(serial, "Starting NetVSC init...").ok();
                     match embclox_hyperv::netvsc::NetvscDevice::init(&mut vmbus, &dma, &memory) {
-                        Ok(mut netvsc) => {
+                        Ok(netvsc) => {
                             let mac = netvsc.mac();
                             writeln!(
                                 serial,
@@ -563,16 +347,18 @@ unsafe extern "C" fn kmain() -> ! {
 
                             // --- Phase 4a: install IDT + enable SynIC SINT2 ISR ---
                             setup_idt();
-                            x86_64::instructions::interrupts::enable();
                             writeln!(
                                 serial,
-                                "IDT installed, interrupts enabled (SINT2 vector {})",
+                                "IDT installed (SINT2 vector {})",
                                 embclox_hyperv::msr::VMBUS_VECTOR
                             )
                             .ok();
 
-                            // --- Phase 3: TX/RX smoke test ---
-                            phase3_smoke_test(&mut serial, &mut netvsc, mac);
+                            // --- Phase 4b: hand the device to embassy and run ---
+                            //
+                            // From this point on the kernel main thread is the
+                            // embassy executor's hlt loop; it never returns.
+                            run_embassy(netvsc);
                         }
                         Err(e) => {
                             writeln!(serial, "NetVSC init failed: {}", e).ok();
@@ -603,5 +389,213 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 fn hcf() -> ! {
     loop {
         unsafe { asm!("hlt") };
+    }
+}
+
+// ── Phase 4b: embassy executor + embassy-net ────────────────────────────
+
+/// Take ownership of an initialized [`embclox_hyperv::netvsc::NetvscDevice`]
+/// and hand it to the embassy executor. Spawns the network runner and a
+/// TCP echo server task on port 1234, then runs the executor forever.
+///
+/// The executor uses a `hlt` between polls so the CPU goes idle when no
+/// task is ready; the SynIC SINT2 ISR (`vmbus_isr`) wakes it via
+/// `NETVSC_WAKER`, and PIT-calibrated TSC alarms cover timer wakeups.
+fn run_embassy(mut netvsc: embclox_hyperv::netvsc::NetvscDevice) -> ! {
+    let mut serial = SerialPort::new(0x3F8);
+
+    // Calibrate the TSC. Prefer the Hyper-V TSC frequency MSR (exact);
+    // fall back to PIT calibration; final fallback is 2.4 GHz default.
+    let tsc_per_us = read_hv_tsc_freq()
+        .or_else(calibrate_tsc_via_pit)
+        .unwrap_or(2400);
+    embclox_hal_x86::time::set_tsc_per_us(tsc_per_us);
+    writeln!(serial, "PHASE4B: TSC calibrated: {} cycles/us", tsc_per_us).ok();
+
+    // Send a gratuitous ARP for our static IP so the host learns our MAC
+    // and the vSwitch starts forwarding broadcasts (incl. ARP requests
+    // from the host) to us. Standard practice for any host coming up
+    // with a static address.
+    //
+    // NOTE: On Windows hosts where Default Switch has previously assigned
+    // 172.19.192.50 to a different VM via its NAT/DHCP service, the host
+    // ARP table will contain a *Permanent* entry for that IP→old MAC.
+    // Gratuitous ARP cannot override Permanent entries; the operator must
+    // clear it (`Remove-NetNeighbor -IPAddress 172.19.192.50`, elevated)
+    // or boot the VM on a clean Default Switch state.
+    let mac = netvsc.mac();
+    let our_ip: [u8; 4] = [172, 19, 192, 50];
+    send_gratuitous_arp(&mut netvsc, mac, our_ip);
+    writeln!(
+        serial,
+        "PHASE4B: gratuitous ARP for {}.{}.{}.{} sent",
+        our_ip[0], our_ip[1], our_ip[2], our_ip[3]
+    )
+    .ok();
+
+    // Wrap the synthetic NIC in the embassy Driver adapter.
+    let driver = NetvscEmbassy::new(netvsc);
+
+    // embassy-net stack with a static IPv4 address.
+    //
+    // We initially used `Config::dhcpv4(Default::default())`, but Hyper-V's
+    // Default Switch DHCP server never replies to smoltcp's DISCOVER (the
+    // embedded DHCP socket hardcodes BOOTP `broadcast: false` and the
+    // Default Switch DHCP server seems to require the broadcast flag, or
+    // expects KVP integration services that we don't implement). Static
+    // configuration is sufficient to validate the embassy/embassy-net
+    // stack end-to-end via TCP echo.
+    //
+    // The address must be on the same /20 as the Default Switch's
+    // dynamically-chosen subnet (verified during Phase 3: 172.19.192.0/20,
+    // gateway 172.19.192.1). Different hosts may pick a different range;
+    // adjust if your Default Switch differs.
+    let config = embassy_net::Config::ipv4_static(embassy_net::StaticConfigV4 {
+        address: embassy_net::Ipv4Cidr::new(embassy_net::Ipv4Address::new(172, 19, 192, 50), 20),
+        gateway: Some(embassy_net::Ipv4Address::new(172, 19, 192, 1)),
+        dns_servers: heapless::Vec::new(),
+    });
+    static RESOURCES: StaticCell<StackResources<5>> = StaticCell::new();
+    let resources = RESOURCES.init(StackResources::new());
+
+    let (stack, runner) = embassy_net::new(driver, config, resources, 0xc0fe_face_dead_beefu64);
+    static STACK: StaticCell<Stack> = StaticCell::new();
+    let stack = &*STACK.init(stack);
+
+    // Embassy executor — single-threaded, hlt-on-idle.
+    static EXECUTOR: StaticCell<embassy_executor::raw::Executor> = StaticCell::new();
+    let executor = EXECUTOR.init(embassy_executor::raw::Executor::new(core::ptr::null_mut()));
+
+    let spawner = executor.spawner();
+    spawner.spawn(net_task(runner).expect("net_task SpawnToken"));
+    spawner.spawn(echo_task(stack).expect("echo_task SpawnToken"));
+
+    writeln!(serial, "PHASE4B: starting embassy executor").ok();
+    x86_64::instructions::interrupts::enable();
+
+    loop {
+        unsafe { executor.poll() };
+        // Fire any expired timer alarms — without an APIC timer interrupt
+        // wired up, this poll-loop call is what advances embassy-time.
+        embclox_hal_x86::time::on_timer_tick();
+        // Belt-and-braces wake — the SINT2 ISR also signals the waker, but
+        // re-arming each loop ensures we never sleep through a freshly
+        // delivered packet.
+        embclox_hyperv::netvsc::NETVSC_WAKER.wake();
+        // Brief pause; we cannot `hlt` blindly because we still need the
+        // poll loop to advance timer alarms (no APIC timer ISR yet).
+        for _ in 0..1000 {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+/// Send a gratuitous ARP for `our_ip` claiming `mac` as the MAC address.
+/// Pads to the 60-byte Ethernet minimum.
+fn send_gratuitous_arp(
+    netvsc: &mut embclox_hyperv::netvsc::NetvscDevice,
+    mac: [u8; 6],
+    our_ip: [u8; 4],
+) {
+    let mut frame = [0u8; 60];
+    frame[0..6].copy_from_slice(&[0xff; 6]);
+    frame[6..12].copy_from_slice(&mac);
+    frame[12..14].copy_from_slice(&0x0806u16.to_be_bytes());
+    frame[14..16].copy_from_slice(&1u16.to_be_bytes()); // HTYPE=Ethernet
+    frame[16..18].copy_from_slice(&0x0800u16.to_be_bytes()); // PTYPE=IPv4
+    frame[18] = 6; // HLEN
+    frame[19] = 4; // PLEN
+    frame[20..22].copy_from_slice(&1u16.to_be_bytes()); // OPER=request
+    frame[22..28].copy_from_slice(&mac);
+    frame[28..32].copy_from_slice(&our_ip);
+    frame[32..38].copy_from_slice(&[0; 6]);
+    frame[38..42].copy_from_slice(&our_ip);
+    let _ = netvsc.transmit_with(60, |buf| buf.copy_from_slice(&frame));
+}
+
+/// Read the Hyper-V TSC frequency MSR (cycles per second) and convert to
+/// cycles per microsecond. Returns None if the MSR isn't readable.
+fn read_hv_tsc_freq() -> Option<u64> {
+    let hz = unsafe { embclox_hyperv::msr::rdmsr(embclox_hyperv::msr::TSC_FREQUENCY) };
+    if hz == 0 { None } else { Some(hz / 1_000_000) }
+}
+
+/// Calibrate TSC frequency using PIT channel 2 (~50ms gate).
+/// Returns TSC ticks per microsecond, or None if the PIT isn't responsive.
+fn calibrate_tsc_via_pit() -> Option<u64> {
+    // PIT channel 2: gate on, mode 0 (one-shot), ~50ms
+    let count: u16 = 59659; // 1193182 Hz / 20 = ~50ms
+
+    outb(0x61, (inb(0x61) & 0x0C) | 0x01); // Gate on, speaker off
+    outb(0x43, 0xB0); // Channel 2, lobyte/hibyte, mode 0
+    outb(0x42, (count & 0xFF) as u8);
+    outb(0x42, (count >> 8) as u8);
+
+    // Reset gate to start counting
+    let gate = inb(0x61);
+    outb(0x61, gate & !0x01);
+    outb(0x61, gate | 0x01);
+
+    let start = unsafe { core::arch::x86_64::_rdtsc() };
+    // Wait for PIT output bit (bit 5 of port 0x61), bounded so we don't
+    // loop forever if the PIT doesn't respond.
+    let mut bounded = 0u64;
+    while inb(0x61) & 0x20 == 0 {
+        bounded += 1;
+        if bounded > 100_000_000 {
+            return None;
+        }
+        core::hint::spin_loop();
+    }
+    let end = unsafe { core::arch::x86_64::_rdtsc() };
+
+    let tsc_per_50ms = end - start;
+    let tsc_per_us = tsc_per_50ms / 50_000;
+    if tsc_per_us > 0 {
+        Some(tsc_per_us)
+    } else {
+        None
+    }
+}
+
+#[embassy_executor::task]
+async fn net_task(mut runner: embassy_net::Runner<'static, NetvscEmbassy>) {
+    runner.run().await
+}
+
+#[embassy_executor::task]
+async fn echo_task(stack: &'static Stack<'static>) {
+    // With the static config the stack is ready immediately; just print
+    // it once for confirmation.
+    let mut serial = SerialPort::new(0x3F8);
+    if let Some(config) = stack.config_v4() {
+        let _ = writeln!(serial, "PHASE4B: IPv4 configured: {}", config.address);
+        if let Some(gw) = config.gateway {
+            let _ = writeln!(serial, "PHASE4B: gateway: {}", gw);
+        }
+    }
+    let _ = writeln!(serial, "PHASE4B ECHO READY: TCP port 1234");
+
+    let mut rx = [0u8; 1024];
+    loop {
+        let mut tx = [0u8; 1024];
+        let mut socket = embassy_net::tcp::TcpSocket::new(*stack, &mut rx, &mut tx);
+        socket.set_timeout(None);
+        if socket.accept(1234).await.is_err() {
+            continue;
+        }
+        let _ = writeln!(serial, "PHASE4B: tcp client connected");
+        loop {
+            let mut data = [0u8; 256];
+            match socket.read(&mut data).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if socket.write_all(&data[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = writeln!(serial, "PHASE4B: tcp client disconnected");
     }
 }

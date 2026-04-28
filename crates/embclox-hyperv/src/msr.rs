@@ -13,6 +13,11 @@ pub const EOM: u32 = 0x40000084;
 // SINT0 base — SINT[n] = SINT0 + n
 pub const SINT0: u32 = 0x40000090;
 
+/// Hyper-V TSC frequency MSR (cycles per second).
+pub const TSC_FREQUENCY: u32 = 0x40000022;
+/// Hyper-V LAPIC frequency MSR (Hz).
+pub const APIC_FREQUENCY: u32 = 0x40000023;
+
 /// VMBus uses SINT2.
 pub const VMBUS_SINT: u32 = 2;
 /// IDT vector for VMBus synthetic interrupts.

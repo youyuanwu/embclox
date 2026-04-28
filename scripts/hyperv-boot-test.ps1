@@ -24,8 +24,9 @@
 param(
     [string]$Iso = "build\hyperv.iso",
     [string]$VMName = "embclox-hyperv-test",
-    [int]$TimeoutSeconds = 90,
+    [int]$TimeoutSeconds = 120,
     [string]$SwitchName = "Default Switch",
+    [string]$StaticVMIp = "172.19.192.50",
     [switch]$Elevate
 )
 
@@ -113,6 +114,21 @@ if ($SwitchName) {
     }
 }
 
+# Default Switch on Windows accumulates *Permanent* ARP entries from past
+# DHCP leases. Once an IP is bound to a (now-stale) MAC, gratuitous ARP
+# from the new VM cannot override it and TCP connects time out. Try to
+# remove any stale entry for our static VM IP. Best-effort: if the
+# current shell isn't elevated this silently no-ops.
+if ($StaticVMIp) {
+    try {
+        Get-NetNeighbor -InterfaceAlias "vEthernet ($SwitchName)" -IPAddress $StaticVMIp -ErrorAction SilentlyContinue |
+            Remove-NetNeighbor -Confirm:$false -ErrorAction SilentlyContinue
+        Write-Host "Cleared any stale ARP entry for $StaticVMIp"
+    } catch {
+        Write-Host "Could not clear ARP for ${StaticVMIp}: $_" -ForegroundColor Yellow
+    }
+}
+
 Write-Host "VM created (Gen1, 256MB, DVD boot, COM1 serial)"
 
 # Start VM
@@ -146,7 +162,9 @@ $serialLog = Join-Path $env:TEMP "$VMName-serial.log"
 $bootPassed = $false
 $vmbusPassed = $false
 $netvscPassed = $false
-$phase3Done = $false
+$phase4bReady = $false
+$echoVerified = $false
+$vmIp = $null
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
 
 while ((Get-Date) -lt $deadline) {
@@ -158,10 +176,50 @@ while ((Get-Date) -lt $deadline) {
             if ($content -match "HYPERV BOOT PASSED") { $bootPassed = $true }
             if ($content -match "VMBUS INIT PASSED") { $vmbusPassed = $true }
             if ($content -match "NETVSC INIT PASSED") { $netvscPassed = $true }
-            if ($content -match "PHASE3 SMOKE TEST DONE") { $phase3Done = $true }
+            if (-not $vmIp -and ($content -match "PHASE4B: IPv4 configured: (\d+\.\d+\.\d+\.\d+)")) {
+                $vmIp = $Matches[1]
+                Write-Host "Detected VM IP: $vmIp" -ForegroundColor Cyan
+            }
+            if ($content -match "PHASE4B ECHO READY") { $phase4bReady = $true }
             if ($content -match "Halting\.") { break }
             if ($content -match "PANIC:") { break }
         }
+    }
+
+    # Once the echo task is ready and we know the IP, try a TCP echo round-trip.
+    if ($phase4bReady -and $vmIp -and -not $echoVerified) {
+        Write-Host "Attempting TCP echo to ${vmIp}:1234 ..." -ForegroundColor Cyan
+        try {
+            $client = New-Object System.Net.Sockets.TcpClient
+            $iar = $client.BeginConnect($vmIp, 1234, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne(3000) -and $client.Connected) {
+                $client.EndConnect($iar)
+                $stream = $client.GetStream()
+                $stream.ReadTimeout = 3000
+                $stream.WriteTimeout = 3000
+                $payload = [System.Text.Encoding]::ASCII.GetBytes("EMBCLOX-PHASE4B-PING")
+                $stream.Write($payload, 0, $payload.Length)
+                $stream.Flush()
+                Start-Sleep -Milliseconds 250
+                $rxBuf = New-Object byte[] 64
+                $n = $stream.Read($rxBuf, 0, $rxBuf.Length)
+                $reply = [System.Text.Encoding]::ASCII.GetString($rxBuf, 0, $n)
+                Write-Host "TCP echo reply: '$reply' ($n bytes)" -ForegroundColor Cyan
+                if ($reply -eq "EMBCLOX-PHASE4B-PING") {
+                    $echoVerified = $true
+                    Write-Host "TCP echo: VERIFIED" -ForegroundColor Green
+                }
+                $stream.Close()
+                $client.Close()
+            } else {
+                Write-Host "TCP connect timeout" -ForegroundColor Yellow
+                $client.Close()
+            }
+        } catch {
+            Write-Host "TCP echo error: $_" -ForegroundColor Yellow
+        }
+        # Echo loop runs forever; once we've verified, stop the VM.
+        if ($echoVerified) { break }
     }
 
     # Check if VM is still running
@@ -218,10 +276,17 @@ if ($netvscPassed) {
     Write-Host "NetVSC: NOT TESTED" -ForegroundColor Yellow
 }
 
-if ($phase3Done) {
-    Write-Host "Phase 3 (TX/RX smoke): DONE" -ForegroundColor Green
+if ($phase4bReady) {
+    Write-Host "Phase 4b (embassy stack ready): READY" -ForegroundColor Green
 } else {
-    Write-Host "Phase 3 (TX/RX smoke): NOT REACHED" -ForegroundColor Yellow
+    Write-Host "Phase 4b (embassy stack ready): NOT REACHED" -ForegroundColor Yellow
+    $exitCode = 1
+}
+
+if ($echoVerified) {
+    Write-Host "TCP echo @ port 1234: VERIFIED" -ForegroundColor Green
+} else {
+    Write-Host "TCP echo @ port 1234: NOT VERIFIED" -ForegroundColor Yellow
 }
 
 # Cleanup

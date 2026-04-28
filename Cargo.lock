@@ -407,6 +407,7 @@ name = "embclox-hyperv"
 version = "0.1.0"
 dependencies = [
  "bindgen",
+ "embassy-net-driver",
  "embassy-sync",
  "embclox-dma",
  "embclox-hal-x86",
@@ -417,11 +418,21 @@ dependencies = [
 name = "embclox-hyperv-example"
 version = "0.1.0"
 dependencies = [
+ "critical-section",
+ "embassy-executor",
+ "embassy-net",
+ "embassy-net-driver",
+ "embassy-sync",
+ "embassy-time",
+ "embassy-time-driver",
  "embclox-dma",
  "embclox-hal-x86",
  "embclox-hyperv",
+ "embedded-io-async",
+ "heapless",
  "limine",
  "log",
+ "static_cell",
  "x86_64",
 ]
 
