@@ -49,6 +49,27 @@ add_custom_command(
 )
 add_custom_target(hyperv-image DEPENDS ${HYPERV_ISO})
 
+# --- VHD image (for Azure Gen1 deployment) ---
+#
+# Uses limine-azure.conf which boots the kernel with `cmdline: net=dhcp`.
+# Azure has a production-grade DHCP server, so DHCP is the right choice.
+# (For local Hyper-V dev use the ISO instead — it defaults to static IP
+# on the dedicated `embclox-test` Internal vSwitch.)
+
+set(HYPERV_VHD "${CMAKE_BINARY_DIR}/hyperv.vhd")
+
+add_custom_command(
+    OUTPUT ${HYPERV_VHD}
+    COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/mkvhd.sh
+        ${CMAKE_SOURCE_DIR}/${HYPERV_KERNEL_REL}
+        ${limine_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/limine-azure.conf
+        ${HYPERV_VHD}
+    DEPENDS hyperv-build
+    COMMENT "Creating Hyper-V VHD image (Azure Gen1, DHCP cmdline)"
+)
+add_custom_target(hyperv-vhd DEPENDS ${HYPERV_VHD})
+
 # --- QEMU run target (VMBus won't work, but tests basic boot) ---
 
 add_custom_target(qemu-hyperv

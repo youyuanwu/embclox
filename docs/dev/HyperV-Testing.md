@@ -81,6 +81,35 @@ evidence confirmed this:
 3. The poisoned MAC `c3` is not any current VM MAC. It belongs to the
    `00-15-5D-XX-XX-XX` Hyper-V vNIC pool that Hyper-V allocates to both
    guest NICs and host vNICs.
+4. The same kernel binary booted on **Azure Gen1** completes DHCP
+   normally and gets `10.0.0.4/24` from Azure's production DHCP
+   server. Azure has no ICS in front of the VM. This proves the guest
+   side of the DHCP exchange is correct end to end — the failure on
+   local Hyper-V is purely the host's ICS DHCP/ARP layer choosing not
+   to reply.
+
+### Not the cause: an unrelated time-driver bug
+
+While debugging this we also found an embassy-time bug in
+`embclox-hal-x86::time` where two `static ApicTimeDriver` instances
+existed: the one registered by `time_driver_impl!` (which embassy
+wrote alarm wakers into) and a second standalone `DRIVER` (which
+`set_tsc_per_us`/`on_timer_tick` mutated). Effect: any
+`embassy_time::Timer::after_*().await` blocked forever because
+embassy registered wakers in one alarm table and our tick handler
+inspected a different one.
+
+This was hidden on local Hyper-V because the Default Switch DHCP
+issue prevented the executor from ever reaching the timer-dependent
+code path. It only surfaced once Azure DHCP succeeded and the
+`echo_task` sat in its `stack.config_v4()` poll loop calling
+`Timer::after_millis(100).await`. Fixed by removing the duplicate
+static; CI still passes.
+
+The two issues are independent:
+- Time-driver fix doesn't unblock local Hyper-V DHCP (still no
+  OFFER comes back through pump_channel).
+- ICS pollution doesn't affect Azure (Azure runs its own DHCP).
 
 ## Why a dedicated Internal vSwitch fixes it
 

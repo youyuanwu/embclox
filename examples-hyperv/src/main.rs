@@ -430,6 +430,9 @@ fn cmdline_str() -> &'static str {
 fn run_embassy(mut netvsc: embclox_hyperv::netvsc::NetvscDevice) -> ! {
     let mut serial = SerialPort::new(0x3F8);
 
+    // Enable Debug to see VMBus packet activity in Azure debugging.
+    log::set_max_level(log::LevelFilter::Debug);
+
     // Calibrate the TSC. Prefer the Hyper-V TSC frequency MSR (exact);
     // fall back to PIT calibration; final fallback is 2.4 GHz default.
     let tsc_per_us = read_hv_tsc_freq()

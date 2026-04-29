@@ -15,14 +15,7 @@ struct ApicTimeDriver {
     alarms: Mutex<core::cell::RefCell<[Option<Alarm>; MAX_ALARMS]>>,
 }
 
-static DRIVER: ApicTimeDriver = ApicTimeDriver {
-    tsc_per_us: AtomicU64::new(1),
-    alarms: Mutex::new(core::cell::RefCell::new([
-        None, None, None, None, None, None, None, None,
-    ])),
-};
-
-embassy_time_driver::time_driver_impl!(static TIME_DRIVER: ApicTimeDriver = ApicTimeDriver {
+embassy_time_driver::time_driver_impl!(static DRIVER: ApicTimeDriver = ApicTimeDriver {
     tsc_per_us: AtomicU64::new(1),
     alarms: Mutex::new(core::cell::RefCell::new([
         None, None, None, None, None, None, None, None,

@@ -814,6 +814,14 @@ impl NetvscDevice {
     fn pump_channel(&mut self) -> Result<(), HvError> {
         let mut raw = [0u8; 512];
         while let Some((desc, raw_len)) = self.channel.try_recv_raw(&mut raw)? {
+            log::debug!(
+                "NetVSC pump: type={} off8={} len8={} raw_len={} txid={}",
+                desc.packet_type,
+                desc.offset8,
+                desc.len8,
+                raw_len,
+                desc.transaction_id
+            );
             match VmbusPacketType::from_u16(desc.packet_type) {
                 Some(VmbusPacketType::DataUsingXferPages) => {
                     // If our single-slot RX buffer is full, leave the

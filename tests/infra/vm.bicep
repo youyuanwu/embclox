@@ -1,21 +1,38 @@
-// Deploys an Azure Gen1 VM that boots a bare-metal Tulip kernel from a VHD.
+// Azure Gen1 VM that boots an embclox kernel directly from a VHD.
 //
-// Two-step deployment:
-//   1. Deploy infra (storage account + network), then upload VHD:
-//      az deployment group create -g <rg> --template-file tests/infra/main.bicep
-//      az storage blob upload --account-name <sa> -c vhds \
-//        -f build/tulip.vhd -n tulip.vhd --type page
-//   2. Redeploy with VHD URI to create the VM:
-//      az deployment group create -g <rg> --template-file tests/infra/main.bicep \
-//        --parameters vhdBlobUri=https://<sa>.blob.core.windows.net/vhds/tulip.vhd
+// Prerequisite: storage.bicep deployed to a (typically separate) RG
+// and the VHD uploaded as a page blob.
+//
+// Usage:
+//   storageRg=embclox-storage
+//   vmRg=embclox-vm
+//   sa=$(az deployment group show -g $storageRg -n storage \
+//         --query properties.outputs.storageAccount.value -o tsv)
+//   vhdUri="https://${sa}.blob.core.windows.net/vhds/hyperv.vhd"
+//   az deployment group create -g $vmRg --template-file tests/infra/vm.bicep \
+//     --parameters vhdBlobUri=$vhdUri storageAccountName=$sa \
+//                  storageResourceGroup=$storageRg
+//
+// Re-deploying with an updated VHD: re-upload the blob to storage RG,
+// then in the VM RG:
+//   az vm deallocate -g $vmRg -n <vmName>
+//   az disk delete -g $vmRg -n <vmName>-osdisk --yes
+//   az deployment group create -g $vmRg --template-file tests/infra/vm.bicep ...
+// Storage RG is never touched.
 
 var baseName = resourceGroup().name
 var location = resourceGroup().location
 
-@description('URI of the VHD blob in Azure Storage (page blob). Leave empty on first deploy to create infra only.')
-param vhdBlobUri string = ''
+@description('URI of the VHD page blob in Azure Storage.')
+param vhdBlobUri string
 
-@description('VM size (must support Gen1)')
+@description('Storage account name (output by storage.bicep).')
+param storageAccountName string
+
+@description('Resource group containing the storage account. Defaults to the VM resource group; set this when storage lives in a separate RG (recommended pattern, keeps storage durable across VM teardowns).')
+param storageResourceGroup string = resourceGroup().name
+
+@description('VM size (must support Gen1).')
 @allowed([
   'Standard_A1_v2'
   'Standard_A2_v2'
@@ -25,10 +42,10 @@ param vhdBlobUri string = ''
 ])
 param vmSize string = 'Standard_D2s_v3'
 
-@description('Enable auto-shutdown schedule')
+@description('Enable auto-shutdown schedule.')
 param enableAutoShutdown bool = true
 
-@description('Auto-shutdown time (24h format)')
+@description('Auto-shutdown time (24h format).')
 param shutdownTime string = '1900'
 
 // Naming
@@ -38,26 +55,12 @@ var nsgName = '${baseName}-nsg'
 var nicName = '${baseName}-nic'
 var publicIpName = '${baseName}-pip'
 var osDiskName = '${baseName}-osdisk'
-var saName = replace(toLower(baseName), '-', '')
-var saNameTrunc = length(saName) > 24 ? substring(saName, 0, 24) : saName
 
-// Storage account for VHD uploads and boot diagnostics
-resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
-  name: saNameTrunc
-  location: location
-  sku: { name: 'Standard_LRS' }
-  kind: 'StorageV2'
-}
-
-// Blob container for VHD images
-resource blobService 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
-  parent: storageAccount
-  name: 'default'
-}
-
-resource vhdContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
-  parent: blobService
-  name: 'vhds'
+// Reference the storage account that storage.bicep created.
+// Scoped explicitly so the storage account can live in a different RG.
+resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
+  name: storageAccountName
+  scope: resourceGroup(storageResourceGroup)
 }
 
 // NSG — allow inbound TCP 1234 (echo server)
@@ -138,8 +141,8 @@ resource nic 'Microsoft.Network/networkInterfaces@2024-07-01' = {
   }
 }
 
-// Managed disk from the uploaded VHD (only when vhdBlobUri is provided)
-resource osDisk 'Microsoft.Compute/disks@2024-03-02' = if (!empty(vhdBlobUri)) {
+// Managed disk imported from the uploaded VHD page blob.
+resource osDisk 'Microsoft.Compute/disks@2024-03-02' = {
   name: osDiskName
   location: location
   properties: {
@@ -153,8 +156,8 @@ resource osDisk 'Microsoft.Compute/disks@2024-03-02' = if (!empty(vhdBlobUri)) {
   }
 }
 
-// Gen1 VM booting from the managed disk (only when vhdBlobUri is provided)
-resource vm 'Microsoft.Compute/virtualMachines@2024-11-01' = if (!empty(vhdBlobUri)) {
+// Gen1 VM booting from the managed disk.
+resource vm 'Microsoft.Compute/virtualMachines@2024-11-01' = {
   name: vmName
   location: location
   properties: {
@@ -182,7 +185,7 @@ resource vm 'Microsoft.Compute/virtualMachines@2024-11-01' = if (!empty(vhdBlobU
 }
 
 // Auto-shutdown
-resource shutdownSchedule 'microsoft.devtestlab/schedules@2018-09-15' = if (enableAutoShutdown && !empty(vhdBlobUri)) {
+resource shutdownSchedule 'microsoft.devtestlab/schedules@2018-09-15' = if (enableAutoShutdown) {
   name: 'shutdown-computevm-${vmName}'
   location: location
   properties: {
@@ -195,12 +198,7 @@ resource shutdownSchedule 'microsoft.devtestlab/schedules@2018-09-15' = if (enab
   }
 }
 
-// Outputs
-var vhdBlobUrl = '${storageAccount.properties.primaryEndpoints.blob}vhds/tulip.vhd'
-output storageAccount string = saNameTrunc
-output uploadCommand string = 'az storage blob upload --account-name ${saNameTrunc} -c vhds -f build/tulip.vhd -n tulip.vhd --type page --overwrite'
-output vhdBlobUri string = vhdBlobUrl
-#disable-next-line BCP318
-output vmName string = !empty(vhdBlobUri) ? vm.name : '(not deployed — provide vhdBlobUri)'
+output vmName string = vm.name
+output publicIpAddress string = publicIp.properties.ipAddress
 output serialConsole string = 'az serial-console connect -g ${resourceGroup().name} -n ${vmName}'
 output bootDiagnostics string = 'az vm boot-diagnostics get-boot-log -g ${resourceGroup().name} -n ${vmName}'
