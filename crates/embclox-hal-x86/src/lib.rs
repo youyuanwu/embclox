@@ -13,6 +13,7 @@ pub mod memory;
 pub mod pci;
 pub mod pic;
 pub mod pit;
+pub mod runtime;
 pub mod serial;
 pub mod time;
 

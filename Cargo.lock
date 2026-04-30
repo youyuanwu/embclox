@@ -394,6 +394,7 @@ version = "0.1.0"
 dependencies = [
  "bootloader_api",
  "critical-section",
+ "embassy-executor",
  "embassy-time-driver",
  "linked_list_allocator",
  "log",

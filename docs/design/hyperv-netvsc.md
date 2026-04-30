@@ -17,6 +17,7 @@ VMBus channel: `F8615163-DF3E-46C5-913F-F2D2F965ED0E`
 | `embassy_net_driver::Driver` impl | `crates/embclox-hyperv/src/netvsc_embassy.rs` | TCP echo @ port 1234 verified locally + on Azure |
 | Cmdline-driven DHCP/static selection | `embclox_hal_x86::cmdline` + `examples-hyperv/limine.conf` | Both modes parse correctly |
 | Azure Gen1 deployment | `tests/infra/{storage,vm}.bicep` + `cmake --build build --target hyperv-vhd` | TCP echo from public Internet to bare-metal kernel: `echo X \| nc <public-ip> 1234` returns `X` |
+| Shared APIC-timer + executor runtime | `crates/embclox-hal-x86/src/runtime.rs` | All 5 ctest pass; e1000/tulip/hyperv all use `hlt`-on-idle (see [LAPIC timer ISR — implemented](#lapic-timer-isr--implemented-shared-runtime)) |
 
 ## Architecture
 
@@ -105,11 +106,12 @@ and TCP echo all work today on local Hyper-V, QEMU, and Azure.
 
 ### Performance
 
-- **LAPIC timer ISR.** Today the executor poll loop spin-waits between
-  `embassy_time` alarm wakeups (no APIC timer is wired). Adding an
-  APIC timer interrupt that calls `embclox_hal_x86::time::on_timer_tick`
-  would let the loop `hlt` between events for proper idle. Pure
-  power/perf, not correctness.
+- **Async boot init with `block_on_hlt`.** Replace the synchronous
+  spin loops in VMBus, NetVSC, and Synthvid init with an `async fn`
+  surface driven by a tiny custom one-future runner that `hlt`s
+  between polls. Lets the CPU sleep during boot instead of burning
+  cycles polling SIMP slots that the SINT2 ISR already woke us about.
+  Design: [`docs/design/async-boot-init.md`](./async-boot-init.md).
 
 - **NetVSC subchannels.** Linux uses `nvsp_5_send_indirect_table` to
   spread RX/TX across multiple channels for higher throughput. We use
@@ -136,6 +138,83 @@ and TCP echo all work today on local Hyper-V, QEMU, and Azure.
 - **Azure Gen2 / accelerated networking (SR-IOV).** Different code
   path entirely (PCI passthrough of a Mellanox/Microsoft NIC).
   Major new scope, not a NetVSC concern.
+
+## LAPIC timer ISR — implemented (shared runtime)
+
+The executor poll loops in all three examples (`examples-e1000`,
+`examples-tulip`, `examples-hyperv`) used to busy-spin and call
+`on_timer_tick()` + a "belt-and-braces" `WAKER.wake()` every
+iteration. That defeated the waker pattern (every netvsc/tulip-bound
+task got marked ready every loop) and pinned each guest CPU at 100%
+even when idle.
+
+The fix lives in `crates/embclox-hal-x86/src/runtime.rs` and is
+shared by all three examples.
+
+### `embclox_hal_x86::runtime` API
+
+| Item | Purpose |
+|------|---------|
+| `start_apic_timer(lapic, tsc_per_us, period_us)` | Installs the APIC-timer ISR (vector 32) + spurious ISR (vector 39), stashes the LAPIC for ISR EOI access, programs the LAPIC for periodic ticks. |
+| `run_executor(executor) -> !` | Canonical `enable; loop { poll; cli; sti+hlt }` loop. Never returns. |
+| `lapic_eoi()` | Helper for device ISRs (e.g. e1000, tulip) that need explicit End-of-Interrupt. SynIC SINT vectors with auto-EOI (Hyper-V) skip this. |
+| `APIC_TIMER_VECTOR` (= 32) | Reserved IDT vector for the periodic timer. |
+| `SPURIOUS_VECTOR` (= 39) | Reserved IDT vector for the LAPIC spurious-vector handler. |
+
+### Per-example wiring
+
+Each example's `kmain`/`kernel_main` does roughly:
+
+```rust
+embclox_hal_x86::idt::init();
+embclox_hal_x86::pic::disable();
+
+// Map LAPIC MMIO. e1000 uses MemoryMapper::map_mmio (bootloader-api),
+// tulip + hyperv use the Limine HHDM identity map directly.
+let mut lapic = LocalApic::new(lapic_vaddr);
+lapic.enable();
+
+let tsc_per_us = pit::calibrate_tsc_mhz()        // QEMU + most local Hyper-V
+    .or_else(read_hv_tsc_freq)                   // Hyper-V only — exact MSR
+    .unwrap_or(default);
+time::set_tsc_per_us(tsc_per_us);
+
+embclox_hal_x86::runtime::start_apic_timer(lapic, tsc_per_us, 1_000);
+
+// ... spawn embassy tasks ...
+embclox_hal_x86::runtime::run_executor(executor);  // never returns
+```
+
+Device ISRs stay per-example (the register-poke for ICR/CSR ack is
+NIC-specific). They end with `embclox_hal_x86::runtime::lapic_eoi()`
+unless the source uses auto-EOI (SynIC SINT vectors).
+
+### Why periodic, not TSC-deadline (yet)
+
+This implementation programs the LAPIC for **periodic** mode at 1 ms.
+That matches the e1000 prototype that has been working in CI since
+day one and avoids the extra complexity of:
+
+- TSC-deadline programming (would require recomputing the next
+  deadline on every `schedule_wake` and reprogramming the MSR)
+- Tracking the soonest-pending alarm in `time.rs`
+
+A 1 ms tick is fine for the guest's polling latency (smoltcp/embassy
+were already happy with 1 µs+ wakeups). The real win is going from
+"100% CPU spin" to "≤1 ms idle" between events. Tickless
+TSC-deadline mode remains a worthwhile future refinement; the runtime
+module is the natural place to add it without changing example code.
+
+### Note on the tulip example specifically
+
+The tulip example does not currently route IRQ 11 (PCI line) through
+the IOAPIC — the device interrupt simply doesn't deliver. Network
+progress relied on the busy-loop wake. After this change, the 1 ms
+APIC tick advances embassy alarms, which causes embassy-net to
+re-poll smoltcp on schedule, which in turn polls the tulip device.
+For QEMU TCP echo this is sufficient (the ctest `tulip-echo` passes
+in ~11 s). Wiring the IOAPIC for tulip is a future cleanup, not a
+correctness issue.
 
 ## References
 

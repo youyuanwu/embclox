@@ -30,22 +30,6 @@ entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
 // Global e1000 MMIO base for ISR to read ICR
 static E1000_REGS_BASE: AtomicUsize = AtomicUsize::new(0);
 
-// Global LAPIC pointer for EOI from interrupt handlers
-static mut LAPIC: Option<LocalApic> = None;
-
-fn lapic() -> &'static LocalApic {
-    unsafe {
-        (*core::ptr::addr_of!(LAPIC))
-            .as_ref()
-            .expect("LAPIC not initialized")
-    }
-}
-
-extern "x86-interrupt" fn apic_timer_handler(_frame: InterruptStackFrame) {
-    embclox_hal_x86::time::on_timer_tick();
-    lapic().end_of_interrupt();
-}
-
 extern "x86-interrupt" fn e1000_handler(_frame: InterruptStackFrame) {
     // Acknowledge e1000 interrupt by reading ICR (read-clear register)
     // Use the global MmioRegs pointer stored at init
@@ -58,10 +42,8 @@ extern "x86-interrupt" fn e1000_handler(_frame: InterruptStackFrame) {
     }
     // Wake the network runner task
     embclox_core::e1000_embassy::NET_WAKER.wake();
-    lapic().end_of_interrupt();
+    embclox_hal_x86::runtime::lapic_eoi();
 }
-
-extern "x86-interrupt" fn spurious_handler(_frame: InterruptStackFrame) {}
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let mut p = embclox_hal_x86::init(boot_info, embclox_hal_x86::Config::default());
@@ -82,19 +64,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     let tsc_per_us = embclox_hal_x86::pit::calibrate_tsc_mhz().expect("PIT TSC calibration failed");
     embclox_hal_x86::time::set_tsc_per_us(tsc_per_us);
 
-    // Register handlers
-    unsafe {
-        embclox_hal_x86::idt::set_handler(32, apic_timer_handler);
-        embclox_hal_x86::idt::set_handler(39, spurious_handler);
-    }
-
-    // Start APIC timer: periodic, ~1ms intervals
-    // tsc_per_us * 1000 = ticks per ms. Divide by APIC divider (16) for APIC count.
-    let apic_count = (tsc_per_us * 1000 / 16) as u32;
-    lapic_dev.set_timer_periodic(32, 16, apic_count);
-
-    // Store global LAPIC for ISR access
-    unsafe { *core::ptr::addr_of_mut!(LAPIC) = Some(lapic_dev) };
+    // Install APIC timer + spurious ISRs and start ~1ms periodic timer.
+    embclox_hal_x86::runtime::start_apic_timer(lapic_dev, tsc_per_us, 1_000);
 
     // Map IOAPIC (kept alive for program lifetime)
     let _ioapic_mmio = p
@@ -187,15 +158,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     spawner.spawn(echo_task(stack).unwrap());
 
     info!("Starting executor with hlt-on-idle...");
-    x86_64::instructions::interrupts::enable();
-    loop {
-        unsafe { executor.poll() };
-        // Halt until next interrupt (APIC timer ~1ms or e1000 RX).
-        // cli before hlt prevents race: interrupt between poll() and hlt
-        // would be lost. enable_and_hlt atomically enables + halts.
-        x86_64::instructions::interrupts::disable();
-        x86_64::instructions::interrupts::enable_and_hlt();
-    }
+    embclox_hal_x86::runtime::run_executor(executor);
 }
 
 #[embassy_executor::task]

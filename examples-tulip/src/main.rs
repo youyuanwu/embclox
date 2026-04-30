@@ -329,6 +329,35 @@ unsafe extern "C" fn kmain() -> ! {
     embclox_hal_x86::time::set_tsc_per_us(tsc_per_us);
     writeln!(serial, "TSC calibrated: {} cycles/us", tsc_per_us).ok();
 
+    // --- Interrupt + APIC timer infrastructure (shared runtime) ---
+    embclox_hal_x86::idt::init();
+    embclox_hal_x86::pic::disable();
+    // The Limine HHDM only covers as much physical RAM as exists
+    // (~1 GiB on QEMU CI), so we can't address LAPIC at 0xFEE0_0000
+    // through it. Build a MemoryMapper and map the LAPIC MMIO page
+    // explicitly via the page tables. MmioMapping has no Drop impl,
+    // so the page-table entry persists for the program lifetime even
+    // after the handle goes out of scope.
+    let mut memory = embclox_hal_x86::memory::MemoryMapper::new(hhdm_offset, kernel_offset);
+    let lapic_vaddr = memory
+        .map_mmio(embclox_hal_x86::apic::LAPIC_PHYS_BASE, 0x1000)
+        .vaddr();
+    let mut lapic = embclox_hal_x86::apic::LocalApic::new(lapic_vaddr);
+    lapic.enable();
+    embclox_hal_x86::runtime::start_apic_timer(lapic, tsc_per_us, 1_000);
+
+    // Map and initialize the IOAPIC so we can route the Tulip PCI IRQ
+    // line through it. Without this routing the tulip_handler ISR
+    // never fires; the previous spin-loop in the executor masked this
+    // by polling the device every iteration. With the new
+    // hlt-on-idle executor the device IRQ MUST deliver for inbound
+    // RX (e.g. TCP SYN) to wake embassy-net's runner.
+    let ioapic_vaddr = memory
+        .map_mmio(embclox_hal_x86::ioapic::IOAPIC_PHYS_BASE, 0x1000)
+        .vaddr();
+    let mut ioapic = embclox_hal_x86::ioapic::IoApic::new(ioapic_vaddr);
+    ioapic.log_info();
+
     // Scan PCI for Tulip NIC
     writeln!(serial, "Scanning PCI bus for Tulip NIC...").ok();
     // Dump all PCI devices for diagnostics
@@ -406,12 +435,16 @@ unsafe extern "C" fn kmain() -> ! {
     writeln!(serial, "TULIP INIT PASSED").ok();
 
     // --- Interrupt setup ---
-    // Set up a minimal IDT for the Tulip interrupt
-    setup_idt();
+    // Register Tulip ISR at vector 33 and route the device's PCI IRQ
+    // line through the IOAPIC so the interrupt actually delivers.
+    unsafe { embclox_hal_x86::idt::set_handler(33, tulip_handler) };
 
     // Read Tulip PCI interrupt line
     let tulip_irq = (pci_config_read(0, slot, 0, 0x3C) & 0xFF) as u8;
     writeln!(serial, "Tulip PCI IRQ line: {}", tulip_irq).ok();
+
+    // Route the IRQ to vector 33 on BSP (LAPIC ID 0).
+    ioapic.enable_irq(tulip_irq, 33, 0);
 
     // Enable device interrupts
     device.enable_interrupts();
@@ -463,28 +496,11 @@ unsafe extern "C" fn kmain() -> ! {
     spawner.spawn(echo_task(stack).expect("spawn echo_task"));
 
     writeln!(serial, "Starting Embassy executor...").ok();
-    x86_64::instructions::interrupts::enable();
-    loop {
-        unsafe { executor.poll() };
-        embclox_hal_x86::time::on_timer_tick();
-        crate::tulip_embassy::TULIP_WAKER.wake();
-        core::hint::spin_loop();
-    }
+    embclox_hal_x86::runtime::run_executor(executor);
 }
 
 // --- Global state for ISR ---
 static mut CSR_FOR_ISR: Option<embclox_tulip::csr::CsrAccess> = None;
-
-// --- Minimal IDT ---
-fn setup_idt() {
-    use x86_64::structures::idt::InterruptDescriptorTable;
-    static mut IDT: InterruptDescriptorTable = InterruptDescriptorTable::new();
-    unsafe {
-        let idt = &raw mut IDT;
-        (&mut *idt)[33].set_handler_fn(tulip_handler);
-        (&*idt).load();
-    }
-}
 
 extern "x86-interrupt" fn tulip_handler(_frame: InterruptStackFrame) {
     unsafe {
@@ -503,6 +519,7 @@ extern "x86-interrupt" fn tulip_handler(_frame: InterruptStackFrame) {
         }
     }
     crate::tulip_embassy::TULIP_WAKER.wake();
+    embclox_hal_x86::runtime::lapic_eoi();
 }
 
 // --- Embassy tasks ---
