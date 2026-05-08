@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+#![feature(abi_x86_interrupt)]
 
 extern crate alloc;
 extern crate embclox_hal_x86;
@@ -7,20 +8,15 @@ extern crate embclox_hal_x86;
 mod harness;
 mod suites;
 
-use bootloader_api::{BootInfo, BootloaderConfig, config::Mapping, entry_point};
 use core::panic::PanicInfo;
 use embclox_core::mmio_regs::MmioRegs;
 use log::*;
 
-const BOOTLOADER_CONFIG: BootloaderConfig = {
-    let mut config = BootloaderConfig::new_default();
-    config.mappings.physical_memory = Some(Mapping::Dynamic);
-    config
-};
+embclox_hal_x86::limine_boot_requests!(limine_boot);
 
-entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
-
-fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
+#[unsafe(no_mangle)]
+unsafe extern "C" fn kmain() -> ! {
+    let boot_info = limine_boot::collect();
     let mut p = embclox_hal_x86::init(boot_info, embclox_hal_x86::Config::default());
     info!("=== embclox test runner ===");
 

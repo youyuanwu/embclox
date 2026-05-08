@@ -42,6 +42,8 @@ param(
     [string]$VMName = "embclox-hyperv-test",
     [int]$TimeoutSeconds = 90,
     [string]$SwitchName = "embclox-test",
+    [string]$ExpectedHostIp = "192.168.234.1",
+    [string]$StaticMac = "00155DEB0100",
     [switch]$Elevate
 )
 
@@ -95,6 +97,60 @@ if (-not (Test-Path $isoPath)) {
     throw "ISO not found: $isoPath. Build with: cmake --build build --target hyperv-image"
 }
 
+# --- Pre-flight checks ---
+# These run BEFORE any VM is created so misconfiguration fails fast with
+# a clear remediation, instead of a 90-second boot ending in a silent
+# 'TCP echo NOT VERIFIED' that's actually a host networking problem.
+
+if (-not $SwitchName) {
+    throw "Pre-flight: -SwitchName must be specified (default: embclox-test). Run scripts/hyperv-setup-vswitch.ps1 to create it."
+}
+
+$vSwitch = Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue
+if (-not $vSwitch) {
+    throw @"
+Pre-flight: vSwitch '$SwitchName' does not exist.
+
+The VM's NetVSC NIC needs a vSwitch to attach to or the host cannot
+reach it. To create the dedicated 'embclox-test' Internal vSwitch, run
+the following ONCE in an elevated PowerShell prompt:
+
+    powershell.exe -ExecutionPolicy Bypass -File scripts/hyperv-setup-vswitch.ps1
+
+(The setup script is idempotent and also assigns 192.168.234.1/24 to
+the host vEthernet adapter so the host can reach the VM at .50.)
+"@
+}
+
+if ($vSwitch.SwitchType -ne 'Internal') {
+    Write-Host "WARNING: vSwitch '$SwitchName' is type '$($vSwitch.SwitchType)' (expected Internal). Static-IP test path may not behave as documented." -ForegroundColor Yellow
+}
+
+if ($ExpectedHostIp) {
+    $ifAlias = "vEthernet ($SwitchName)"
+    $hostIp = Get-NetIPAddress -InterfaceAlias $ifAlias -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+              Where-Object { $_.IPAddress -eq $ExpectedHostIp }
+    if (-not $hostIp) {
+        throw @"
+Pre-flight: host adapter '$ifAlias' is missing IP '$ExpectedHostIp'.
+
+The VM boots with a static IP in the same subnet (192.168.234.50/24)
+and the host needs the matching gateway address ($ExpectedHostIp/24)
+to be reachable. Without it the host cannot route to the VM and the
+TCP echo probe will silently time out.
+
+To fix, run the following ONCE in an elevated PowerShell prompt:
+
+    powershell.exe -ExecutionPolicy Bypass -File scripts/hyperv-setup-vswitch.ps1
+
+To skip this check (e.g. for a DHCP-only test scenario), pass
+-ExpectedHostIp '' to the script.
+"@
+    }
+}
+
+Write-Host "Pre-flight checks passed: vSwitch '$SwitchName' present, host IP '$ExpectedHostIp' configured." -ForegroundColor Green
+
 # Copy ISO to local Windows path (Hyper-V can't use \\wsl.localhost paths)
 $localIso = Join-Path $env:TEMP "$VMName.iso"
 Write-Host "Copying ISO to local path: $localIso"
@@ -117,17 +173,20 @@ Set-VMDvdDrive -VMName $VMName -Path $localIso
 Set-VMComPort -VMName $VMName -Number 1 -Path $pipePath
 Write-Host "COM1 configured: $pipePath"
 
-# Attach the (single, default) NIC to a vSwitch so the synthetic NetVSC
-# device has somewhere to send/receive frames.
-if ($SwitchName) {
-    $vSwitch = Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue
-    if ($vSwitch) {
-        Get-VMNetworkAdapter -VMName $VMName | Connect-VMNetworkAdapter -SwitchName $SwitchName
-        Write-Host "Network adapter connected to vSwitch: $SwitchName"
-    } else {
-        Write-Host "vSwitch '$SwitchName' not found - leaving NIC unconnected" -ForegroundColor Yellow
-    }
-}
+# Attach the (single, default) NIC to the vSwitch we pre-validated above.
+Get-VMNetworkAdapter -VMName $VMName | Connect-VMNetworkAdapter -SwitchName $SwitchName
+Write-Host "Network adapter connected to vSwitch: $SwitchName"
+
+# Pin a static MAC so the host's ARP cache stays valid across runs.
+# Hyper-V dynamic MACs change every New-VM (00:15:5D:...:dc, dd, de, ...);
+# the host's ARP entry for 192.168.234.50 then points at the previous run's
+# MAC and Windows ignores the new VM's gratuitous ARP, silently breaking
+# the TCP probe. The chosen MAC is in Hyper-V's prefix (00:15:5D) with a
+# distinctive suffix (EB:01:00 -> "embclox 1 0") that won't collide with
+# Hyper-V dynamic allocation (Hyper-V increments from a host-derived base
+# in the lower bytes; EB:01:00 is well outside any allocator range).
+Set-VMNetworkAdapter -VMName $VMName -StaticMacAddress $StaticMac
+Write-Host "Static MAC pinned: $StaticMac"
 
 Write-Host "VM created (Gen1, 256MB, DVD boot, COM1 serial)"
 
@@ -285,8 +344,15 @@ if ($phase4bReady) {
 
 if ($echoVerified) {
     Write-Host "TCP echo @ port 1234: VERIFIED" -ForegroundColor Green
+} elseif ($phase4bReady) {
+    # Reaching ECHO READY means the kernel is fine - if echo still failed,
+    # the host networking is misconfigured and CI must surface it.
+    Write-Host "TCP echo @ port 1234: FAILED (kernel reached ECHO READY but host TCP probe timed out)" -ForegroundColor Red
+    Write-Host "  Likely cause: vSwitch port not bridging traffic, host firewall, or stale ARP." -ForegroundColor Red
+    Write-Host "  Check: Get-NetIPAddress -InterfaceAlias 'vEthernet ($SwitchName)'; arp -a $vmIp" -ForegroundColor DarkGray
+    $exitCode = 1
 } else {
-    Write-Host "TCP echo @ port 1234: NOT VERIFIED" -ForegroundColor Yellow
+    Write-Host "TCP echo @ port 1234: NOT TESTED (kernel never reached ECHO READY)" -ForegroundColor Yellow
 }
 
 # Cleanup

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-bootloader_api.workspace = true
+limine = "0.5"
 x86_64.workspace = true
 uart_16550.workspace = true
 log.workspace = true

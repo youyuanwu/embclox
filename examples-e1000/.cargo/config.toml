@@ -1,2 +1,9 @@
 [build]
 target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C", "link-arg=-Texamples-e1000/linker.ld",
+    "-C", "link-arg=--no-pie",
+    "-C", "relocation-model=static",
+]

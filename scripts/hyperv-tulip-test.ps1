@@ -28,6 +28,7 @@ param(
     [string]$Iso = "build\tulip.iso",
     [string]$VMName = "embclox-tulip-test",
     [int]$TimeoutSeconds = 60,
+    [string]$SwitchName = "Default Switch",
     [switch]$Elevate
 )
 
@@ -83,6 +84,27 @@ if (-not (Test-Path $isoPath)) {
     throw "ISO not found: $isoPath. Build with: cmake --build build --target tulip-image"
 }
 
+# --- Pre-flight: vSwitch must exist ---
+# Tulip uses Default Switch (Hyper-V NAT/ICS) for DHCP. Without the
+# switch, the VM boots, runs DHCP, and silently never gets a lease;
+# 60s later you see 'TCP echo NOT VERIFIED' with no useful diagnostic.
+# Fail fast with a clear remediation.
+$vSwitch = Get-VMSwitch -Name $SwitchName -ErrorAction SilentlyContinue
+if (-not $vSwitch) {
+    throw @"
+Pre-flight: vSwitch '$SwitchName' does not exist.
+
+The Tulip test attaches the legacy NIC to the Hyper-V default NAT/DHCP
+switch. If you removed it, re-enable the Hyper-V Windows feature (which
+restores 'Default Switch' automatically), or recreate it manually:
+
+    New-VMSwitch -Name 'Default Switch' -SwitchType Internal
+
+To use a different switch, pass -SwitchName.
+"@
+}
+Write-Host "Pre-flight: vSwitch '$SwitchName' present." -ForegroundColor Green
+
 # Hyper-V cannot use files on network paths (e.g. \\wsl.localhost\...).
 # Copy to a local Windows temp directory.
 $localIso = Join-Path $env:TEMP "$VMName.iso"
@@ -120,12 +142,18 @@ $defaultNic = Get-VMNetworkAdapter -VMName $VMName
 if ($defaultNic) {
     Remove-VMNetworkAdapter -VMName $VMName
 }
-Add-VMNetworkAdapter -VMName $VMName -IsLegacy $true -SwitchName "Default Switch"
+Add-VMNetworkAdapter -VMName $VMName -IsLegacy $true -SwitchName $SwitchName
 # Allow the kernel to use whatever MAC it reads from the emulated EEPROM.
-# Hyper-V's virtual switch filters by MAC — enable MAC spoofing so our
+# Hyper-V's virtual switch filters by MAC - enable MAC spoofing so our
 # EEPROM-read MAC isn't dropped by the switch.
 Set-VMNetworkAdapter -VMName $VMName -MacAddressSpoofing On
-Write-Host "Legacy Network Adapter added (DEC 21140 Tulip, MAC spoofing on)" -ForegroundColor Green
+# Note: NO static port MAC here. Unlike the static-IP NetVSC test
+# (scripts/hyperv-boot-test.ps1), tulip uses DHCP - every New-VM gets a
+# fresh dynamic MAC which produces a fresh DHCP transaction and a fresh
+# IP. The host's ARP cache for that IP is empty, so the first ARP
+# resolves cleanly. Pinning a static MAC here would actually risk
+# colliding with a stale lease from a previous run that wasn't released.
+Write-Host "Legacy Network Adapter added (DEC 21140 Tulip on $SwitchName, MAC spoofing on)" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "VM created (Gen1, 256MB, DVD boot, COM1 serial, Legacy NIC)"
@@ -269,8 +297,8 @@ if ($targetIp) {
         Write-Host "TCP test failed: $_" -ForegroundColor Yellow
     }
 } else {
-    Write-Host 'No IP found. Kernel uses static 10.0.2.15 (QEMU default).' -ForegroundColor Yellow
-    Write-Host 'For Hyper-V, update kernel to match Default Switch subnet or use DHCP.' -ForegroundColor Yellow
+    Write-Host 'No IP found. Kernel uses DHCP via Default Switch; lease may not have arrived.' -ForegroundColor Yellow
+    Write-Host 'Check the serial log for "DHCP assigned: ..." or run with longer -TimeoutSeconds.' -ForegroundColor Yellow
     $tcpPassed = $false
 }
 
@@ -313,12 +341,27 @@ if ($bootPassed) {
 } else {
     Write-Host "Boot: INCONCLUSIVE (VM state: $vmState)" -ForegroundColor Yellow
 }
+
+# TCP outcome reporting:
+# - PASSED  -> green, exit 0
+# - reached $initPassed but TCP did not pass -> red, exit 1 (the kernel
+#   was up and listening, so failure is host-side networking we want
+#   surfaced, not silently swallowed)
+# - never reached $initPassed -> yellow (boot itself failed; the boot
+#   line above already accounts for that)
+$exitCode = 0
 if ($tcpPassed) {
     Write-Host "TCP:  PASSED" -ForegroundColor Green
+} elseif ($initPassed) {
+    Write-Host "TCP:  FAILED (kernel reached TULIP INIT PASSED but host TCP probe did not echo)" -ForegroundColor Red
+    Write-Host "  Likely cause: DHCP lease changed and host ARP is stale, switch port not bridging, or host firewall." -ForegroundColor Red
+    Write-Host "  Check: Get-VMNetworkAdapter -VMName $VMName | Format-List MacAddress,IPAddresses; arp -a" -ForegroundColor DarkGray
+    $exitCode = 1
 } else {
-    Write-Host "TCP:  SKIPPED or FAILED" -ForegroundColor Yellow
+    Write-Host "TCP:  NOT TESTED (kernel never reached TULIP INIT PASSED)" -ForegroundColor Yellow
+    $exitCode = 2
 }
-$exitCode = if ($bootPassed) { 0 } else { 2 }
+if (-not $bootPassed) { $exitCode = 2 }
 
 # Cleanup
 Write-Host ""

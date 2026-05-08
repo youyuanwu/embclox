@@ -17,13 +17,15 @@ embclox/
 ├── crates/
 │   ├── embclox-hal-x86/     # x86_64 HAL: APIC, IOAPIC, PIC, IDT, PIT,
 │   │                        #   memory mapper, heap, serial, time
-│   │                        #   driver, runtime (executor + APIC timer)
+│   │                        #   driver, runtime (executor + APIC timer),
+│   │                        #   limine_boot (request macro + collect)
 │   ├── embclox-dma/         # DMA allocator trait + DmaRegion
 │   ├── embclox-{e1000,tulip,hyperv}/  # device drivers
 │   └── embclox-core/        # shared driver glue (e1000_embassy, etc.)
-├── examples-e1000/          # bootloader-api boot, e1000 NIC, QEMU/KVM
+├── examples-e1000/          # Limine boot, e1000 NIC, QEMU/KVM
 ├── examples-tulip/          # Limine boot, Tulip NIC, QEMU SLIRP
 ├── examples-hyperv/         # Limine boot, NetVSC over VMBus, Hyper-V/Azure
+├── qemu-tests/unit/         # Limine-booted host-side test harness
 ├── tests/infra/             # bicep templates for Azure deployment
 ├── scripts/                 # qemu-test.sh, hyperv-*.ps1, mkvhd.sh
 ├── docs/{design,dev}/       # architecture + dev guides
@@ -41,18 +43,25 @@ Every example follows the same skeleton (see `examples-e1000/src/main.rs`
 for the cleanest reference):
 
 1. `#![no_std] #![no_main] #![feature(abi_x86_interrupt)]`
-2. Boot: bootloader-api `entry_point!` macro **or** Limine
-   `RequestsStartMarker` / `RequestsEndMarker` + handcrafted `kmain`.
-3. **HAL init** in this exact order:
+2. **Limine boot setup** — call the HAL macro near the top of `main.rs`:
    ```rust
+   embclox_hal_x86::limine_boot_requests!(limine_boot);
+   ```
+   This declares the standard Limine request statics (HHDM, kernel
+   address, cmdline, memory map, framebuffer, stack size) inside a
+   private `limine_boot` module and exposes a `collect()` function.
+3. Define the kernel entry point: `#[unsafe(no_mangle)] unsafe extern "C" fn kmain() -> !`
+4. **HAL init** — single call replaces serial/heap/MemoryMapper bring-up:
+   ```rust
+   let boot_info = limine_boot::collect();
+   let mut p = embclox_hal_x86::init(boot_info, embclox_hal_x86::Config::default());
+   // p.serial, p.pci, p.memory ready to use
    embclox_hal_x86::idt::init();          // shared IDT singleton
    embclox_hal_x86::pic::disable();       // remove legacy PIC
    ```
-4. **LAPIC**:
-   - bootloader-api: `p.memory.map_mmio(LAPIC_PHYS_BASE, 0x1000)`
-   - Limine: `LAPIC_PHYS_BASE as usize + hhdm_offset as usize`
-   - `lapic.enable()`
-5. **TSC calibration** + embassy time driver:
+5. **LAPIC**: `let lapic_vaddr = p.memory.map_mmio(LAPIC_PHYS_BASE, 0x1000).vaddr();`
+   then `lapic.enable()`.
+6. **TSC calibration** + embassy time driver:
    ```rust
    let tsc_per_us = embclox_hal_x86::pit::calibrate_tsc_mhz()
        // On Hyper-V, prefer the synthetic MSR (exact):
@@ -60,18 +69,18 @@ for the cleanest reference):
        .unwrap_or(default);
    embclox_hal_x86::time::set_tsc_per_us(tsc_per_us);
    ```
-6. **Shared runtime** — installs APIC-timer ISR (vector 32) and
+7. **Shared runtime** — installs APIC-timer ISR (vector 32) and
    spurious ISR (vector 39):
    ```rust
    embclox_hal_x86::runtime::start_apic_timer(lapic, tsc_per_us, 1_000);
    ```
-7. Device discovery (PCI scan or VMBus offer scan), driver init.
-8. Register device ISR via `embclox_hal_x86::idt::set_handler(vec, isr)`.
+8. Device discovery (PCI scan or VMBus offer scan), driver init.
+9. Register device ISR via `embclox_hal_x86::idt::set_handler(vec, isr)`.
    The ISR must end with `embclox_hal_x86::runtime::lapic_eoi()` unless
    the source is a SynIC SINT vector with auto-EOI (Hyper-V VMBus).
-9. Construct embassy-net `Stack` + `Runner` from a `Driver` impl.
-10. Spawn `net_task` and an application task (e.g. echo).
-11. Hand control to the executor:
+10. Construct embassy-net `Stack` + `Runner` from a `Driver` impl.
+11. Spawn `net_task` and an application task (e.g. echo).
+12. Hand control to the executor:
     ```rust
     embclox_hal_x86::runtime::run_executor(executor);  // never returns
     ```
@@ -95,7 +104,7 @@ Network mode is selected at boot via the kernel command line, parsed by
 Each example provides its own `StaticDefaults` constant (e.g.
 `192.168.234.50/24` for the dedicated `embclox-test` Hyper-V vSwitch).
 
-For Limine examples, configure entries in `limine.conf` (and add it to
+For all examples, configure boot entries in `limine.conf` (and add it to
 the ISO custom-command `DEPENDS` so cmake rebuilds when the conf
 changes — see `examples-tulip/CMakeLists.txt`). Default boot entry
 must match the CI environment:
@@ -106,6 +115,9 @@ must match the CI environment:
 - Azure deployment → `cmdline: net=dhcp` via `limine-azure.conf`
   (Azure's DHCP server is production-grade)
 
+The kernel reads its cmdline from `boot_info.cmdline` returned by
+`limine_boot::collect()`.
+
 ## Build commands (verified)
 
 ```bash
@@ -115,13 +127,16 @@ cargo check -p embclox-hal-x86
 # Per-example build (cross to x86_64-unknown-none via .cargo/config.toml):
 cd examples-hyperv && cargo build --release
 
-# Image artefacts (CMake + xorriso/dd):
+# Image artefacts (CMake + xorriso/dd) — every example uses the same
+# Limine ISO pipeline:
 cmake -B build
+cmake --build build --target e1000-image     # -> build/e1000.iso
+cmake --build build --target unit-test-image # -> build/unit-tests.iso
 cmake --build build --target tulip-image     # -> build/tulip.iso
 cmake --build build --target hyperv-image    # -> build/hyperv.iso (local)
 cmake --build build --target hyperv-vhd      # -> build/hyperv.vhd  (Azure)
 
-# Run all CI tests (5 currently: unit, integration, tulip-{boot,echo}, hyperv-boot):
+# Run all CI tests (5 currently: e1000-echo, unit, tulip-{boot,echo}, hyperv-boot):
 ctest --test-dir build --output-on-failure
 ```
 
@@ -236,11 +251,14 @@ Driver crates (`embclox-e1000`, `embclox-tulip`, `embclox-hyperv`) are
 pure `no_std` libraries — they take a generic `DmaAllocator` and don't
 know about bootloaders. The example crate is responsible for:
 
-- Choosing the bootloader (bootloader-api vs Limine)
+- Declaring Limine request statics via `embclox_hal_x86::limine_boot_requests!`
+- Calling `embclox_hal_x86::init(boot_info, Config::default())` for HAL
+  bring-up (serial, heap, memory mapper)
 - Providing the `DmaAllocator` impl (often a bump allocator over an
-  HHDM-mapped region)
+  HHDM-mapped region from `limine_boot::MEMMAP_REQUEST`, or
+  `BootDmaAllocator` for heap-backed DMA)
 - Wiring interrupts (IDT vector, IOAPIC route, ISR body)
-- Selecting the embassy-net config (DHCP/static via cmdline)
+- Selecting the embassy-net config (DHCP/static via `boot_info.cmdline`)
 
 If you find yourself writing bootloader-specific code inside a driver
 crate, that's a smell — push it back into the example.

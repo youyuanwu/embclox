@@ -20,10 +20,11 @@ Driver crates (`embclox-e1000`, `embclox-tulip`, `embclox-hyperv`)
 take an `&impl DmaAllocator` so each example can supply its own
 implementation:
 
-- **`examples-e1000`** uses `BootDmaAllocator` (page-table-based,
-  via `bootloader_api`).
+- **`examples-e1000` and `qemu-tests/unit`** use `BootDmaAllocator`
+  (heap-backed, translates kernel virt→phys via the offsets that
+  `embclox_hal_x86::init` reads from Limine).
 - **`examples-tulip` / `examples-hyperv`** use a bump allocator over
   the Limine HHDM-mapped sub-4GB physical memory pool.
 
-Keeping the allocator out of the driver crates lets the same drivers
-work under different bootloaders without conditional compilation.
+Keeping the allocator out of the driver crates lets each example pick
+the strategy that matches its DMA footprint.

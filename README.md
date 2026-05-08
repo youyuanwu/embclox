@@ -14,7 +14,7 @@ targeting QEMU and Hyper-V (including Azure Gen1).
 | [`crates/embclox-tulip/`](crates/embclox-tulip/README.md) | DEC 21143 (Tulip) NIC driver |
 | [`crates/embclox-hyperv/`](crates/embclox-hyperv/README.md) | Hyper-V VMBus + NetVSC driver |
 | [`crates/embclox-core/`](crates/embclox-core/README.md) | Shared driver glue (e1000_embassy, BootDmaAllocator, etc.) |
-| [`examples-e1000/`](examples-e1000/README.md) | bootloader-api boot, e1000 NIC, QEMU/KVM TCP echo |
+| [`examples-e1000/`](examples-e1000/README.md) | Limine boot, e1000 NIC, QEMU/KVM TCP echo |
 | [`examples-tulip/`](examples-tulip/README.md) | Limine boot, Tulip NIC, QEMU SLIRP TCP echo |
 | [`examples-hyperv/`](examples-hyperv/README.md) | Limine boot, NetVSC over VMBus, local Hyper-V + Azure Gen1 TCP echo |
 | `qemu-tests/unit/` | no_std unit tests run inside QEMU |

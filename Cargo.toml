@@ -2,7 +2,6 @@
 resolver = "2"
 
 members = [
-    "tools/embclox-mkimage",
     "examples-e1000",
     "examples-hyperv",
     "examples-tulip",
@@ -18,7 +17,6 @@ members = [
 ]
 
 default-members = [
-    "tools/embclox-mkimage",
     "crates/embclox-async",
     "crates/embclox-core",
     "crates/embclox-dma",
@@ -49,8 +47,6 @@ embclox-core = { path = "crates/embclox-core" }
 embclox-e1000 = { path = "crates/embclox-e1000" }
 embclox-hal-x86 = { path = "crates/embclox-hal-x86" }
 embclox-test-macros = { path = "crates/embclox-test-macros" }
-bootloader = "0.11"
-bootloader_api = "0.11"
 x86_64 = "0.15"
 uart_16550 = "0.6"
 

@@ -2,11 +2,11 @@ use alloc::alloc::{alloc_zeroed, dealloc, Layout};
 use embclox_dma::{DmaAllocator, DmaRegion};
 use log::*;
 
-/// DmaAllocator implementation for x86_64 with bootloader offset-mapped memory.
+/// DmaAllocator implementation for x86_64 with Limine HHDM-mapped memory.
 ///
 /// Translates kernel heap addresses to physical addresses for DMA, and
-/// returns virtual addresses through the bootloader's physical memory
-/// mapping so CPU reads are coherent with DMA writes in QEMU TCG mode.
+/// returns virtual addresses through Limine's higher-half direct map so
+/// CPU reads are coherent with DMA writes in QEMU TCG mode.
 #[derive(Clone)]
 pub struct BootDmaAllocator {
     /// Offset to convert kernel virtual addresses to physical:

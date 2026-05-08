@@ -5,7 +5,6 @@
 extern crate alloc;
 extern crate embclox_hal_x86;
 
-use bootloader_api::{BootInfo, BootloaderConfig, config::Mapping, entry_point};
 use core::panic::PanicInfo;
 use core::sync::atomic::AtomicUsize;
 use embassy_net::{Ipv4Address, Ipv4Cidr, Stack, StackResources, StaticConfigV4};
@@ -19,13 +18,7 @@ use log::*;
 use static_cell::StaticCell;
 use x86_64::structures::idt::InterruptStackFrame;
 
-const BOOTLOADER_CONFIG: BootloaderConfig = {
-    let mut config = BootloaderConfig::new_default();
-    config.mappings.physical_memory = Some(Mapping::Dynamic);
-    config
-};
-
-entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
+embclox_hal_x86::limine_boot_requests!(limine_boot);
 
 // Global e1000 MMIO base for ISR to read ICR
 static E1000_REGS_BASE: AtomicUsize = AtomicUsize::new(0);
@@ -45,9 +38,11 @@ extern "x86-interrupt" fn e1000_handler(_frame: InterruptStackFrame) {
     embclox_hal_x86::runtime::lapic_eoi();
 }
 
-fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
+#[unsafe(no_mangle)]
+unsafe extern "C" fn kmain() -> ! {
+    let boot_info = limine_boot::collect();
     let mut p = embclox_hal_x86::init(boot_info, embclox_hal_x86::Config::default());
-    info!("Booting embclox example...");
+    info!("Booting embclox e1000 example via Limine UEFI...");
 
     // --- Interrupt infrastructure ---
     embclox_hal_x86::idt::init();

@@ -49,19 +49,14 @@ jobs:
         working-directory: examples-hyperv
         run: cargo clippy -- -D warnings
 
-      - name: Build disk images
-        run: |
-          cargo build --manifest-path examples-e1000/Cargo.toml --target x86_64-unknown-none
-          cargo build --manifest-path qemu-tests/unit/Cargo.toml --target x86_64-unknown-none
-          cargo run -p embclox-mkimage -- target/x86_64-unknown-none/debug/embclox-example target/x86_64-unknown-none/debug/embclox-example.img
-          cargo run -p embclox-mkimage -- target/x86_64-unknown-none/debug/embclox-unit-tests target/x86_64-unknown-none/debug/embclox-unit-tests.img
-
       - name: Install QEMU and OVMF
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf netcat-openbsd xorriso
 
       - name: QEMU tests
         run: |
           cmake -B build
+          cmake --build build --target e1000-image
+          cmake --build build --target unit-test-image
           cmake --build build --target tulip-image
           cmake --build build --target hyperv-image
           ctest --test-dir build --output-on-failure
