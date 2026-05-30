@@ -1,0 +1,15 @@
+[package]
+name = "embclox-driver"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+embclox-hal-x86.workspace = true
+embclox-dma.workspace = true
+embclox-hyperv.workspace = true
+embclox-e1000.workspace = true
+embclox-tulip.workspace = true
+embclox-core.workspace = true
+embassy-net-driver.workspace = true
+x86_64.workspace = true
+log.workspace = true

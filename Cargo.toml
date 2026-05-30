@@ -9,6 +9,7 @@ members = [
     "crates/embclox-async",
     "crates/embclox-core",
     "crates/embclox-dma",
+    "crates/embclox-driver",
     "crates/embclox-e1000",
     "crates/embclox-hal-x86",
     "crates/embclox-hyperv",
@@ -20,6 +21,7 @@ default-members = [
     "crates/embclox-async",
     "crates/embclox-core",
     "crates/embclox-dma",
+    "crates/embclox-driver",
     "crates/embclox-e1000",
     "crates/embclox-hal-x86",
     "crates/embclox-hyperv",
@@ -41,6 +43,7 @@ embedded-io-async = "0.7"
 # Drivers & platform
 embclox-async = { path = "crates/embclox-async" }
 embclox-dma = { path = "crates/embclox-dma" }
+embclox-driver = { path = "crates/embclox-driver" }
 embclox-hyperv = { path = "crates/embclox-hyperv" }
 embclox-tulip = { path = "crates/embclox-tulip" }
 embclox-core = { path = "crates/embclox-core" }

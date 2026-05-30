@@ -64,30 +64,21 @@ while a `VmBusDevice` carries `(class_guid, instance_guid,
 ChannelHandle)`. Forcing a single `Device` enum would either lose
 information or require every driver to downcast.
 
-### `DeviceInfo`
+Both device types must be `Clone` (the boot flow consumes the
+enumeration via `.iter().cloned()`). Today's `PciDevice` in
+[crates/embclox-hal-x86/src/pci.rs](../../crates/embclox-hal-x86/src/pci.rs)
+does not yet derive `Clone` — added as part of Phase 1 (see
+"Phase 1 HAL prerequisites" below).
 
-A small "what is this" trait every bus device implements so the
-registry can log uniformly without caring about the bus:
+### `DeviceInfo` — deferred
 
-```rust
-pub trait DeviceInfo {
-    fn bus_name(&self) -> &'static str;       // "pci" | "vmbus"
-    fn id(&self) -> heapless::String<48>;     // "0000:00:03.0" | "f8615163-df3e-46c5-913f-f2d2f965ed0e"
-    fn class(&self) -> DeviceClass;            // Net | Storage | Display | Other
-}
-```
-
-`heapless::String<48>` (not `<32>`): a canonical 8-4-4-4-12 VMBus
-GUID is 36 bytes; `<48>` adds bracket/class-prefix margin without
-significant cost.
-
-**Status of `DeviceInfo` and `DeviceClass`**: the trait currently
-has no consumer in the boot flow below — it is staged for future
-unified probe-time logging. If implementation reveals no caller, it
-should be deleted before merge rather than carried as speculative
-abstraction. `DeviceClass::Storage` is a forward-looking variant
-even though storage is deferred per
-[gap-analysis.md](./gap-analysis.md) Tier-3.
+An earlier draft proposed a `DeviceInfo` trait
+(`bus_name()` / `id()` / `class()`) to give the registry a
+bus-agnostic log line. With no caller in the current boot flow it
+is YAGNI; the per-bus probe loops log via `drv.name()` and the
+concrete device's `{:?}`. Add `DeviceInfo` only when a second
+consumer appears (e.g. a `/proc/devices`-style introspection
+endpoint).
 
 ### `Driver`
 
@@ -98,14 +89,16 @@ concrete device type:
 ```rust
 pub trait PciDriver: Send + Sync {
     fn name(&self) -> &'static str;
+    fn priority(&self) -> u8;                            // lower wins; see Multi-NIC
     fn matches(&self, dev: &PciDevice) -> bool;
-    fn probe(&self, dev: PciDevice, ctx: &mut ProbeCtx) -> Result<Box<dyn NetDevice>, ProbeError>;
+    fn probe(&self, dev: PciDevice, ctx: &mut ProbeCtx) -> Result<Box<dyn EmbcloxNic>, ProbeError>;
 }
 
 pub trait VmBusDriver: Send + Sync {
     fn name(&self) -> &'static str;
+    fn priority(&self) -> u8;
     fn matches(&self, dev: &VmBusDevice) -> bool;
-    fn probe(&self, dev: VmBusDevice, ctx: &mut ProbeCtx) -> Result<Box<dyn NetDevice>, ProbeError>;
+    fn probe(&self, dev: VmBusDevice, ctx: &mut ProbeCtx) -> Result<Box<dyn EmbcloxNic>, ProbeError>;
 }
 ```
 
@@ -127,12 +120,80 @@ the bus handle, the DMA allocator, the `MemoryMapper`, the `IoApic`
 handle (to wire its IRQ), and a callback to register an ISR vector.
 This avoids making each driver `unsafe` reach into globals.
 
-### `NetDevice`
+### `EmbcloxNic` (dyn-safe network device)
 
-We already have `embassy_net_driver::Driver` impls for all three NICs
-(`E1000Embassy`, `TulipEmbassy`, `NetvscEmbassy`). The abstraction
-just collects them behind `Box<dyn embassy_net_driver::Driver>` —
-nothing new.
+`embassy_net_driver::Driver` has GAT-typed RX/TX tokens
+(`type RxToken<'a> where Self: 'a`) and is **explicitly not
+dyn-compatible** per its upstream docs. We therefore cannot use
+`Box<dyn embassy_net_driver::Driver>` directly as the registry's
+return type.
+
+The registry instead returns a local, dyn-safe wrapper trait that
+threads packet access through a `&mut dyn FnMut(&mut [u8])`
+callback — the standard pattern for erasing GATs:
+
+```rust
+pub trait EmbcloxNic: Send {
+    /// Returns true if a packet was delivered (and `f` invoked).
+    fn poll_rx(&mut self, cx: &mut Context<'_>, f: &mut dyn FnMut(&mut [u8])) -> bool;
+
+    /// Returns true if `len` bytes were enqueued (and `f` invoked).
+    fn poll_tx(&mut self, cx: &mut Context<'_>, len: usize, f: &mut dyn FnMut(&mut [u8])) -> bool;
+
+    fn link_state(&mut self, cx: &mut Context<'_>) -> LinkState;
+    fn capabilities(&self) -> Capabilities;
+    fn hardware_address(&self) -> HardwareAddress;
+}
+```
+
+A single adapter newtype bridges `Box<dyn EmbcloxNic>` back to the
+GAT trait that `embassy_net::Stack` requires:
+
+```rust
+pub struct DynNic(pub Box<dyn EmbcloxNic>);
+
+impl embassy_net_driver::Driver for DynNic {
+    type RxToken<'a> = DynRxToken<'a> where Self: 'a;
+    type TxToken<'a> = DynTxToken<'a> where Self: 'a;
+    // receive/transmit construct tokens that, when consumed, call
+    // EmbcloxNic::poll_rx / poll_tx with the user's closure as the
+    // `&mut dyn FnMut(&mut [u8])` argument.
+    // ...
+}
+```
+
+Each existing per-NIC adapter (`E1000Embassy`, `TulipEmbassy<D>`,
+`NetvscEmbassy`) keeps its current `embassy_net_driver::Driver` impl
+— a thin `impl EmbcloxNic for E1000Embassy { ... }` block per crate
+forwards `poll_rx` to the existing `recv_with` / `transmit_with`
+path. No rewrite of the data-plane code.
+
+**Cost.** One extra indirect call per packet boundary
+(through `Box<dyn EmbcloxNic>`) plus the `&mut dyn FnMut` indirection
+on the closure. This is on top of the inherent vtable cost discussed
+in **T-1**; budget ~30–80 ns/packet total versus a monomorphised
+impl. Acceptable for Tier-1 (control-plane echo / small-MTU
+workloads); revisit when Tier-2 NAPI batching lands — the batching
+amortises the indirection across hundreds of packets per IRQ, same
+as the Linux mitigation playbook described in T-1.
+
+**Why this shape vs. alternatives.** Two other shapes were
+considered (see also **T-1**):
+
+- **`enum Nic { E1000(..), Tulip(..), Netvsc(..) }`** —
+  monomorphised data plane, no vtable. Rejected because every new
+  in-tree NIC requires editing a central enum **and** loses the
+  "driver crate is self-contained" property (the enum can't live in
+  a per-driver crate without circular deps).
+- **`embassy-net-driver-channel` adapter** — concrete `Device<MTU>`
+  struct, no `dyn` anywhere. Rejected because it forces one extra
+  packet copy through the channel buffer and pins the kernel to a
+  single compile-time MTU, both of which we'd rather not pay until
+  measurements demand it.
+
+The `EmbcloxNic` wrapper preserves the registry's runtime-dispatch
+shape, costs only the indirect call (no copy), and stays compatible
+with all three driver crates as-is.
 
 ### Registry
 
@@ -150,8 +211,10 @@ pub struct DriverRegistry {
 
 impl DriverRegistry {
     pub fn new() -> Self { ... }
-    pub fn register_pci(&mut self, drv: Box<dyn PciDriver>) { ... }
-    pub fn register_vmbus(&mut self, drv: Box<dyn VmBusDriver>) { ... }
+    /// Convenience: boxes the driver internally so callers write
+    /// `registry.register_pci(E1000Driver)` instead of `Box::new(...)`.
+    pub fn register_pci(&mut self, drv: impl PciDriver + 'static) { ... }
+    pub fn register_vmbus(&mut self, drv: impl VmBusDriver + 'static) { ... }
     pub fn pci(&self)   -> &[Box<dyn PciDriver>];
     pub fn vmbus(&self) -> &[Box<dyn VmBusDriver>];
 }
@@ -166,19 +229,25 @@ registry at boot:
 let mut registry = DriverRegistry::new();
 embclox_driver::register_default_drivers(&mut registry);
 // app can also register a custom driver here:
-// registry.register_pci(Box::new(MyCustomDriver::new(custom_config)));
+// registry.register_pci(MyCustomDriver::new(custom_config));
 
-let nics = probe_all(&registry, &mut probe_ctx, &pci, hyperv_vmbus.as_ref())?;
+let nics = probe_all(&registry, &mut probe_ctx, &pci, hyperv_vmbus.as_ref());
 ```
+
+`probe_all` returns `Vec<ProbedNic>` (never `Err`) — individual
+probe failures are logged and skipped per the boot flow below; the
+caller cannot recover any way other than "pick a primary or panic",
+so there is no `?` on this line. Its full definition is the body of
+the "Boot flow" pseudocode below.
 
 Where `register_default_drivers` is just:
 
 ```rust
 // crates/embclox-driver/src/defaults.rs
 pub fn register_default_drivers(registry: &mut DriverRegistry) {
-    registry.register_pci(Box::new(embclox_e1000::driver::E1000Driver));
-    registry.register_pci(Box::new(embclox_tulip::driver::TulipDriver));
-    registry.register_vmbus(Box::new(embclox_hyperv::driver::NetvscDriver));
+    registry.register_pci(embclox_e1000::driver::E1000Driver);
+    registry.register_pci(embclox_tulip::driver::TulipDriver);
+    registry.register_vmbus(embclox_hyperv::driver::NetvscDriver);
 }
 ```
 
@@ -341,7 +410,7 @@ kernel_main(boot_info)
   │
   ├─ let mut registry = DriverRegistry::new();
   ├─ register_default_drivers(&mut registry);
-  │   // app may also call registry.register_pci(Box::new(MY_CUSTOM_DRIVER)) here
+  │   // app may also call registry.register_pci(MY_CUSTOM_DRIVER) here
   │
   ├─ ProbeCtx { dma, memory, ioapic, irq_alloc, pci }
   │
@@ -349,9 +418,12 @@ kernel_main(boot_info)
   ├─ // Iteration order: device-major + first-successful-probe-wins per device.
   ├─ // This matches Linux's pci_register_driver semantics.
   ├─ let mut claimed: BTreeSet<(u8,u8,u8)> = BTreeSet::new();
+  ├─ let mut nics:    Vec<ProbedNic>       = Vec::new();
   ├─ for dev in pci.enumerate().iter().cloned():
   │     if claimed.contains(&(dev.bus, dev.dev, dev.func)) { continue; }
-  │     for &drv in registry.pci():
+  │     if nics.len() >= PROBE_BUDGET { break; }   // hard cap; see Probe-then-discard cost
+  │     for drv in registry.pci():                 // drv: &Box<dyn PciDriver>
+  │         if drv.matches(&dev) {
   │         if drv.matches(&dev) {
   │             match drv.probe(dev, &mut ctx) {
   │                 Ok(nic) => {
@@ -365,7 +437,7 @@ kernel_main(boot_info)
   │
   ├─ if let Some(vmbus) = &vmbus:
   │     for offer in vmbus.enumerate().iter().cloned():
-  │         for &drv in registry.vmbus():
+  │         for drv in registry.vmbus():
   │             if drv.matches(&offer) {
   │                 match drv.probe(offer, &mut ctx) {
   │                     Ok(nic) => { nics.push(ProbedNic::new(nic, drv.priority(), drv.name())); break; }
@@ -376,13 +448,20 @@ kernel_main(boot_info)
   ├─ drop(registry);                    // probing done; registry no longer needed
   │
   ├─ // Multi-NIC selection — see Multi-NIC section
-  ├─ let primary = match nics.into_iter().min_by_key(|n| n.priority) {
-  │     Some(p) => { for n in &nics { log::info!("nic {} priority={}", n.name, n.priority); } p }
-  │     None => panic!("no recognised NIC; enumerated devices: {:?}", pci.enumerate()),
-  │ };
-  ├─ embassy_net::Stack::new(primary.driver, …)
+  ├─ if nics.is_empty() {
+  │     panic!("no recognised NIC; enumerated devices: {:?}", pci.enumerate());
+  │ }
+  ├─ for n in &nics { log::info!("nic {} priority={}", n.name, n.priority); }
+  ├─ let primary = nics.into_iter().min_by_key(|n| n.priority).unwrap();
+  ├─ embassy_net::Stack::new(DynNic(primary.driver), …)
   └─ runtime::run_executor(...)
 ```
+
+`PROBE_BUDGET` is a small compile-time constant (Tier-1 default: 4)
+that caps the number of NICs the registry will probe before
+bailing. Without it, a hostile or misconfigured PCI topology with
+many matching cards could exhaust `BootDmaAllocator` (~1 MiB per
+probed NIC; see "Probe-then-discard cost").
 
 Three changes from a naive sketch worth highlighting:
 
@@ -404,24 +483,25 @@ constructor.
 VMBus initialisation is expensive and crashes on bare hardware, so we
 gate it on the Hyper-V CPUID leaves **plus the synthetic-feature
 bits** — vendor-string alone false-positives under
-`qemu -cpu host,+hypervisor,hv_synic,hv_vendor_id=...`:
+`qemu -cpu host,+hypervisor,hv_synic,hv_vendor_id=...`.
+
+[crates/embclox-hyperv/src/detect.rs](../../crates/embclox-hyperv/src/detect.rs)
+already implements this check today:
 
 ```rust
+use embclox_hyperv::detect;
+
 fn is_hyperv() -> bool {
-    let cpuid = raw_cpuid::CpuId::new();
-    let Some(hv_info) = cpuid.get_hypervisor_info() else { return false; };
-    if !matches!(hv_info.identify(), raw_cpuid::Hypervisor::HyperV) { return false; }
-    // Vendor-string match is necessary but not sufficient. Also require
-    // the feature bits embclox_hyperv actually uses (hypercall + SynIC
-    // + SyntheticTimer). Linux's hv_is_hyperv_initialized() does the same.
-    let leaf_3 = unsafe { core::arch::x86_64::__cpuid(0x4000_0003) };
-    const HV_HYPERCALL_AVAILABLE: u32 = 1 << 5;
-    const HV_SYNIC_AVAILABLE:     u32 = 1 << 2;
-    const HV_SYNTIMER_AVAILABLE:  u32 = 1 << 3;
-    let needed = HV_HYPERCALL_AVAILABLE | HV_SYNIC_AVAILABLE | HV_SYNTIMER_AVAILABLE;
-    (leaf_3.eax & needed) == needed
+    matches!(detect::detect(), Some(f) if f.has_synic && f.has_hypercall)
 }
 ```
+
+`detect::detect()` returns `Some(HvFeatures { has_synic,
+has_hypercall, .. })` only when CPUID leaf `0x4000_0000` reports
+the Hyper-V vendor string; the boot flow tightens that to require
+the two feature bits `embclox_hyperv::init` actually depends on.
+Linux's `hv_is_hyperv_initialized()` (`drivers/hv/hv_common.c`)
+does the same.
 
 VMBus init failure is **non-fatal**: the boot flow uses `.ok()` to
 demote `Err` to `None`, the vmbus probe loop is skipped, and the
@@ -473,6 +553,36 @@ struct from "SMP-forward design choices §1" — that is the
 authoritative signature; this section's earlier `Result<u8>` sketch
 has been removed. There is one binding signature.
 
+### `ProbeError`
+
+A single error enum lives in `embclox-driver` and is returned by
+both `ProbeCtx::install_pci_isr` and `PciDriver::probe` /
+`VmBusDriver::probe`:
+
+```rust
+#[derive(Debug)]
+pub enum ProbeError {
+    /// PCI config 0x3C reported 0xFF (no IRQ wired) or a pin index
+    /// outside the IOAPIC's redirection table.
+    InvalidIrqLine(u8),
+    /// `VectorAllocator` ran out of free IDT vectors.
+    NoFreeVector,
+    /// `MemoryMapper::map_mmio` failed (out of HHDM space, etc.).
+    MmioMap,
+    /// `BootDmaAllocator` allocation failed (heap exhausted).
+    DmaAlloc,
+    /// Driver-specific failure (link timeout, EEPROM CRC, VMBus
+    /// channel-open NAK, ...). Carries a `&'static str` so each
+    /// driver can give a one-line reason without dragging in
+    /// `alloc::string::String` here.
+    Driver(&'static str),
+}
+```
+
+Drivers are free to map their internal errors to `Driver(...)` via
+a small `From` impl. Only `InvalidIrqLine`, `NoFreeVector`,
+`MmioMap`, and `DmaAlloc` are produced by `ProbeCtx` itself.
+
 ### Vector reservations
 
 The `VectorAllocator` does **not** start with the full `33..=47`
@@ -482,7 +592,7 @@ kernel:
 | Vector | Owner | Notes |
 |--------|-------|-------|
 | 32 | APIC timer | `runtime::start_apic_timer` |
-| 34 | `embclox_hyperv::msr::VMBUS_VECTOR` | SINT2 IDT entry; reserved when `is_hyperv()` returns true |
+| 34 | `embclox_hyperv::msr::VMBUS_VECTOR` | SINT2 IDT entry; reserved when `is_hyperv()` returns true, regardless of whether `embclox_hyperv::init` later succeeds. Cheap (one slot of 12) and keeps the reservation invariant simple. |
 | 39 | spurious | `runtime::start_apic_timer` |
 | 33, 35–38, 40–47 | available for `install_pci_isr` | 12 vectors total |
 
@@ -530,7 +640,7 @@ offset — out of scope for Tier-1.
 ## Multi-NIC
 
 If both an e1000 and a tulip card are present, we probe both — they
-both succeed and each produces a `Box<dyn embassy_net_driver::Driver>`.
+both succeed and each produces a `Box<dyn EmbcloxNic>`.
 But embassy-net's `Stack` is monomorphised on a single driver type:
 
 ```rust
@@ -539,18 +649,18 @@ impl<D: Driver, const N: usize> Stack<D, N> { ... }
 
 So we pick **one primary NIC** for the stack. To preserve driver
 identity (priority, name, log line) past the type-erased
-`Box<dyn embassy_net_driver::Driver>`, the probe loop wraps each
-result in `ProbedNic`:
+`Box<dyn EmbcloxNic>`, the probe loop wraps each result in
+`ProbedNic`:
 
 ```rust
 pub struct ProbedNic {
-    pub driver:   Box<dyn embassy_net_driver::Driver>,
+    pub driver:   Box<dyn EmbcloxNic>,
     pub priority: u8,                      // lower wins
     pub name:     &'static str,            // "e1000", "tulip", "netvsc"
 }
 
 impl ProbedNic {
-    pub fn new(driver: Box<dyn embassy_net_driver::Driver>, priority: u8, name: &'static str) -> Self {
+    pub fn new(driver: Box<dyn EmbcloxNic>, priority: u8, name: &'static str) -> Self {
         Self { driver, priority, name }
     }
 }
@@ -601,58 +711,51 @@ follow-up work; not a Tier-1 blocker.
 ## Bootloader
 
 **Limine is the framework's standard bootloader.** This is a
-framework-level commitment, not a per-example choice — the
-unified `examples-kernel` requires a single protocol, and the
-existing per-example divergence (`bootloader_api` for
-e1000/tulip, Limine for hyperv) cannot be carried into a
-framework that targets ring-0 I/O appliances on both QEMU and
-Hyper-V/Azure.
+framework-level commitment, not a per-example choice. The
+standardisation work (formerly "Phase 0") **is already complete in
+the tree** as of the current commit:
 
-Why Limine wins:
+- [`embclox_hal_x86::init`](../../crates/embclox-hal-x86/src/lib.rs)
+  is Limine-native (`init(boot_info: LimineBootInfo<'_>, config:
+  Config) -> Peripherals`); no `bootloader_api` constructor exists.
+- [examples-e1000/CMakeLists.txt](../../examples-e1000/CMakeLists.txt),
+  [examples-tulip/CMakeLists.txt](../../examples-tulip/CMakeLists.txt),
+  and [examples-hyperv/CMakeLists.txt](../../examples-hyperv/CMakeLists.txt)
+  all build Limine BIOS+UEFI ISOs through the same pipeline.
+- The workspace has no remaining `bootloader_api` references.
+
+Why Limine is the standard:
 
 - **Hyper-V Gen1 deployment requires it.** `bootloader_api` does
   not produce Gen1-compatible images; `examples-hyperv`
   established the working Limine path for Hyper-V/Azure.
-- **One bootloader, one HAL init path.** Two protocols means two
-  initialisers, two `BootInfo` shapes, two memory maps to merge
-  with `MemoryMapper`. Standardising removes a long-tail source
-  of divergence between QEMU and bare-metal/cloud.
+- **One bootloader, one HAL init path.** Two protocols would mean
+  two initialisers, two `BootInfo` shapes, two memory maps to
+  merge with `MemoryMapper`. Standardising removed a long-tail
+  source of divergence between QEMU and bare-metal/cloud.
 - **HHDM model fits.** Limine's higher-half direct map is what
-  `MemoryMapper::map_mmio` already builds on for the Hyper-V
-  examples.
+  `MemoryMapper::map_mmio` builds on.
 - **Active maintenance + Rust-friendly.** The Limine protocol is
   documented, stable, and the `limine` crate is `no_std`-clean.
 
-### Migration scope (Phase 0)
+### Outstanding doc cleanup
 
-Before any driver-model work lands:
+The code migration is done; the docs are not. Before merging the
+driver-model work, sweep:
 
-1. **Generalise `embclox_hal_x86::init`** to be Limine-native. The
-   public signature changes from `init(&mut BootInfo, Config)` to
-   accepting Limine response pointers (the existing
-   `examples-hyperv` boot wiring is the template). The
-   `bootloader_api` constructor is removed, not paralleled —
-   carrying both indefinitely is what created the divergence we
-   are fixing.
-2. **Migrate `examples-e1000` and `examples-tulip`** to the Limine
-   bootloader (`limine.conf`, `linker.ld`, `.cargo/config.toml`,
-   ISO build via `cmake --build build --target {example}-image`).
-   `examples-hyperv` is the working reference.
-3. **Update CI** to build all three single-driver examples + the
-   forthcoming `examples-kernel` via the same Limine ISO pipeline.
-   Remove the `bootloader_api` build job.
-4. **Update `embclox-hal-x86` README + the embclox-examples skill**
-   so new contributors see Limine as the only documented path.
+1. **`embclox-hal-x86` README** — mention Limine as the only
+   supported boot protocol.
+2. **The embclox-examples skill** (`/home/user1/code/embclox/.github/skills/embclox-examples/SKILL.md`)
+   — same.
+3. **Any in-tree doc that still says "bootloader_api or Limine"**
+   — grep and update.
 
-This Phase-0 work is **a sibling commit** to the driver-model
-implementation, not part of it — but it must land first because
-the driver model's `examples-kernel` deliverable assumes a single
-boot protocol.
+These are doc-only; they don't gate Phase 1.
 
-### Why not parallel `init` constructors
+### Why a single boot protocol is non-negotiable
 
-A `bootloader_api`-vs-Limine fork in `embclox_hal_x86` would
-preserve QEMU contributor convenience at the cost of:
+A `bootloader_api`-vs-Limine fork in `embclox_hal_x86` would have
+meant:
 
 - Two `BootInfo` shapes propagating through every HAL caller.
 - Two memory-map merge implementations.
@@ -661,37 +764,54 @@ preserve QEMU contributor convenience at the cost of:
   affect?").
 
 The framework's positioning as "ring-0 I/O appliances on QEMU AND
-cloud" makes Limine the only viable convergent answer.
+cloud" makes Limine the only viable convergent answer — which is
+why the migration was completed before this design landed.
 
 ## Decided trade-offs
 
 Four design choices flagged during review require explicit
 recording so future readers can see what was considered.
 
-### T-1: Data-plane driver hand-off — `Box<dyn>` (Linux-style dispatch)
+### T-1: Data-plane driver hand-off — `Box<dyn EmbcloxNic>` (local dyn-safe wrapper)
 
-The probe loop returns `Box<dyn embassy_net_driver::Driver>` and
-`embassy_net::Stack` is monomorphised on a single concrete `D`. The
-two viable shapes:
+`embassy_net_driver::Driver` has GAT-typed `RxToken<'a>` / `TxToken<'a>`
+and is **not dyn-compatible** (upstream docs). The registry needs a
+uniform return type for runtime dispatch, so we wrap each driver in
+a local dyn-safe trait `EmbcloxNic` (see "`EmbcloxNic`" above) and
+bridge back to `embassy_net::Stack` via a `DynNic` newtype adapter.
 
-- **`Box<dyn>` (chosen).** Cleaner registry shape; additive for new
-  drivers. Per-packet cost: ~10–50 ns from one indirect call + lost
-  inlining at the dispatch boundary.
-- **`enum Nic { E1000(..), Tulip(..), Netvsc(..) }`.** Monomorphised
-  data plane, no per-packet vtable. Cost: every new NIC kind
-  requires editing the enum; flexibility lost.
+Three shapes were considered:
 
-**Context: this cost is universal, not Rust-specific.** Linux's
-network drivers register a `struct net_device_ops` with function
-pointers (`ndo_start_xmit`, etc.) that every TX path dereferences:
+- **`Box<dyn EmbcloxNic>` (chosen).** Preserves the registry's
+  runtime-dispatch shape with **zero packet copies**. Driver crates
+  add one small `impl EmbcloxNic` block on top of their existing
+  `embassy_net_driver::Driver` impl — no rewrite. Per-packet cost:
+  ~30–80 ns from the `Box<dyn EmbcloxNic>` vtable + the
+  `&mut dyn FnMut` closure indirection used to erase the token GATs.
+- **`enum Nic { E1000(..), Tulip(..), Netvsc(..) }`.** Monomorphised,
+  no vtable. Rejected: every new in-tree NIC edits a central enum,
+  and the enum can't live in any single driver crate without
+  circular deps. Loses the "each driver crate is self-contained"
+  property the registry was built around.
+- **`embassy-net-driver-channel` adapter.** Concrete `Device<MTU>`,
+  no `dyn` anywhere. Rejected: forces one extra packet copy through
+  the channel buffer and pins the kernel to a single compile-time
+  MTU. Worth revisiting only if measurements show `Box<dyn>` is the
+  bottleneck (it won't be at Tier-1 packet rates).
+
+**Context: indirection on the data plane is universal, not
+Rust-specific.** Linux's network drivers register a
+`struct net_device_ops` with function pointers (`ndo_start_xmit`,
+etc.) that every TX path dereferences:
 `dev->netdev_ops->ndo_start_xmit(skb, dev)`. That's the same
-indirect call our `Box<dyn Driver>` produces — same machine code,
-same hardware cost. C just doesn't call its struct-of-fn-pointers a
-"vtable." So **`Box<dyn>` is the Linux-equivalent design**, not a
-degraded one.
+indirect call our `Box<dyn EmbcloxNic>` produces — same machine
+code, same hardware cost. C just doesn't call its struct-of-fn-
+pointers a "vtable." So **the chosen design is Linux-equivalent**,
+not degraded.
 
-**Decision.** Keep `Box<dyn>` and follow the Linux mitigation
-playbook when the data plane actually demands it:
+**Decision.** Keep `Box<dyn EmbcloxNic>` + `DynNic` adapter, and
+follow the Linux mitigation playbook when the data plane actually
+demands it:
 
 1. **Tier-2 NAPI batching** — drain RX rings in batches per IRQ so
    the indirect call is amortised over hundreds of packets. This
@@ -705,14 +825,13 @@ playbook when the data plane actually demands it:
    reads the device's RX ring directly without going through the
    embassy-net stack at all. Comparable to DPDK's bypass model.
 
-The enum-monomorphisation approach (Position B above) is the
-**DPDK-equivalent design** — used when you need the absolute last
-50 ns/packet and have decided to forgo pluggable drivers entirely.
-That's a different workload class than Tier-2 even at its most
-aggressive; reach for it only if measurements show the Linux
-mitigation playbook isn't enough. Add a `cargo asm --release` check
-on `Stack::poll` before freezing the trait surface to confirm the
-cost matches the estimate.
+The enum-monomorphisation shape is the **DPDK-equivalent design**
+— used when you need the absolute last 50 ns/packet and have
+decided to forgo pluggable drivers entirely. That's a different
+workload class than Tier-2 even at its most aggressive; reach for
+it only if measurements show the Linux mitigation playbook isn't
+enough. Add a `cargo asm --release` check on `Stack::poll` before
+freezing the trait surface to confirm the cost matches the estimate.
 
 ### T-2: No-NIC boot policy — explicit panic with diagnostic
 
@@ -749,14 +868,13 @@ log. PR template item links any `crates/embclox-*` add to a
 `register_default_drivers` edit. Revisit `linkme` if the in-tree
 driver count exceeds ~5.
 
-### T-4: Bootloader — Limine (framework standard)
+### T-4: Bootloader — Limine (framework standard, migration complete)
 
-Limine is the embclox framework's standard bootloader, not just a
-choice for `examples-kernel`. See "Bootloader" section above for
-the full rationale and Phase-0 migration scope (port
-`examples-e1000`/`examples-tulip` from `bootloader_api` to Limine,
-remove the `bootloader_api` constructor from `embclox_hal_x86`).
-Phase 0 must land before Phase 2 (`examples-kernel`).
+Limine is the embclox framework's standard bootloader. The HAL and
+all three `examples-*` crates already build through the Limine
+pipeline; see the "Bootloader" section above for the rationale and
+the small remaining doc-cleanup list. **This trade-off is recorded
+for history; it does not gate Phase 1.**
 
 ## Lifecycle
 
@@ -768,17 +886,17 @@ stack frame) and matches the bare-metal "we never shut down" model.
 **Probe-and-discard contract.** The `DriverRegistry` and the
 `Box<dyn PciDriver>` instances inside it are dropped after probing
 completes. All driver state required after probe **must be moved
-into the returned `Box<dyn embassy_net_driver::Driver>`** during
-`probe()`, or written to the driver's own static slots before
-`probe()` returns. The `PciDriver`/`VmBusDriver` trait object
-itself becomes invalid after `drop(registry)`. This rule is
-enforced by `probe(&self, ...)` taking `&self` rather than `self`
-by value (drivers cannot move state out of themselves into the
-`NetDevice`); implementations that hold per-device state in the
-driver struct must duplicate it into the returned device or use a
-static slot. This caveat ties into the multi-instance limitation
-in "ISR registration" — the static-slot pattern is also why each
-driver caps at one instance for now.
+into the returned `Box<dyn EmbcloxNic>`** during `probe()`, or
+written to the driver's own static slots before `probe()` returns.
+The `PciDriver`/`VmBusDriver` trait object itself becomes invalid
+after `drop(registry)`. This rule is enforced by
+`probe(&self, ...)` taking `&self` rather than `self` by value
+(drivers cannot move state out of themselves into the `EmbcloxNic`);
+implementations that hold per-device state in the driver struct
+must duplicate it into the returned device or use a static slot.
+This caveat ties into the multi-instance limitation in "ISR
+registration" — the static-slot pattern is also why each driver
+caps at one instance for now.
 
 If we later add suspend/resume or driver unload, this trait will
 grow a `remove()` method, but nothing in current examples needs it.
@@ -794,41 +912,59 @@ grow a `remove()` method, but nothing in current examples needs it.
 - Per-driver ISRs. They remain `static extern "x86-interrupt" fn`.
 - `examples-e1000` / `examples-tulip` / `examples-hyperv` continue
   to exist as small, single-driver references that newcomers can
-  read in one sitting. (Phase 0 changes their bootloader from
-  `bootloader_api` to Limine — driver code and example structure
-  are unchanged.)
+  read in one sitting. (All three already use Limine — see
+  "Bootloader".)
 
 ## Migration path
 
-Four phases, each independently shippable. **Phase 0 is a
-prerequisite** for the driver model itself.
+Two phases, each independently shippable. Limine standardisation
+(formerly "Phase 0") is already in the tree — see "Bootloader".
 
-0. **Standardise on Limine** (Phase 0, sibling commit). Migrate
-   `embclox_hal_x86::init` to be Limine-native, port
-   `examples-e1000` and `examples-tulip` from `bootloader_api` to
-   Limine using `examples-hyperv` as the template, update CI to
-   build all examples through the same Limine ISO pipeline. See
-   "Bootloader" section above. Without this, Phase 2's
-   `examples-kernel` is unbuildable.
+### Phase 1 — HAL prerequisites + driver-model crate
 
-1. **Define traits + extract constructors.** Add `crates/embclox-driver`
-   with `Bus`, `PciDriver`, `VmBusDriver`, `ProbeCtx`,
-   `VectorAllocator`, `DriverRegistry`, and a
-   `register_default_drivers(&mut DriverRegistry)` helper. No
-   examples change. Each driver crate gains a `driver` module
-   exposing a marker type (e.g. `pub struct E1000Driver;`)
-   implementing `PciDriver`.
+The driver model depends on three small HAL additions and one
+trait-impl deficit that don't exist today:
 
-2. **Add `examples-kernel`** that calls
-   `register_default_drivers()` then runs the registry probe loop.
-   Existing `examples-*` crates are untouched. CI grows one more
-   `qemu` test: boot `examples-kernel` with `-device e1000`, then
-   with `-device tulip`, expect both to print the matching driver
-   name and a TCP echo.
+1. **`PciBus::enumerate() -> &[PciDevice]`** in
+   [crates/embclox-hal-x86/src/pci.rs](../../crates/embclox-hal-x86/src/pci.rs).
+   Today's scanner only exposes `find_device` / `find_device_any`
+   and walks bus 0 / dev 0..32 / func 0 only. The registry needs a
+   full scan with multi-function and (later) multi-bus support, and
+   wants a cached slice it can hand out by reference.
+2. **`#[derive(Clone)]` on `PciDevice`** — required by the boot
+   flow's `pci.enumerate().iter().cloned()`. Trivial; `PciDevice`
+   is `Copy`-eligible (all `u8` / `u16` fields).
+3. **`VectorAllocator`, `CpuId`, and `InstalledIsr`** in
+   `embclox-hal-x86`. None exist today; per the "ISR registration"
+   and "SMP-forward design choices" sections, the allocator
+   consumes a `&[u8]` exclusion list and returns `InstalledIsr {
+   vector, cpu_id: CpuId }`. On the current single-CPU runtime,
+   `CpuId::BSP` is the only variant and `apic_id()` returns the BSP
+   APIC ID.
+4. **`crates/embclox-driver`** with `Bus`, `PciDriver`,
+   `VmBusDriver`, `EmbcloxNic`, `DynNic`, `ProbeCtx`,
+   `DriverRegistry`, `ProbeError`, `ProbedNic`, and
+   `register_default_drivers`. Each existing driver crate gains a
+   small `driver` module exposing a marker type (e.g.
+   `pub struct E1000Driver;`) implementing the matching trait and
+   an `impl EmbcloxNic` block forwarding to the existing `*Embassy`
+   adapter.
 
-3. **(Optional) Retire single-driver examples.** Only worth doing if
-   the unified binary becomes the canonical reference. We probably
-   keep them as documentation regardless.
+No `examples-*` crate changes in this phase.
+
+### Phase 2 — `examples-kernel`
+
+Add `examples-kernel` that calls `register_default_drivers()` then
+runs the registry probe loop. Existing `examples-*` crates are
+untouched. CI grows one more `qemu` lane: boot `examples-kernel`
+with `-device e1000`, then with `-device tulip`, expect each to
+print the matching driver name and a TCP echo. The existing
+Hyper-V CI lane covers the NetVSC branch.
+
+### Phase 3 — (Optional) Retire single-driver examples
+
+Only worth doing if the unified binary becomes the canonical
+reference. We probably keep them as documentation regardless.
 
 ## Trade-offs
 
@@ -850,7 +986,7 @@ prerequisite** for the driver model itself.
 | Driver registration | `module_pci_driver()` macro → linker section | Driver crate exports a marker type (e.g. `pub struct E1000Driver;`); `kernel_main` calls `registry.register_pci(Box::new(E1000Driver))` |
 | Match tables | `MODULE_DEVICE_TABLE(pci, …)` | `Driver::matches(&dev) -> bool` (code, not data — gives flexibility for class-code matches) |
 | Probe | `drv->probe(dev)` | `Driver::probe(dev, &mut ProbeCtx)` |
-| net subsystem | `register_netdev()` → `struct net_device` | `Box<dyn embassy_net_driver::Driver>` returned from probe |
+| net subsystem | `register_netdev()` → `struct net_device` | `Box<dyn EmbcloxNic>` returned from probe; `DynNic` adapter bridges to `embassy_net::Stack` |
 | Hot-plug | uevent, `kobject_uevent()` | not supported |
 | Module loading | `insmod`, `request_module()` | L1 only (statically linked, runtime-registered). L2/L3 are future, see "Dynamic loading roadmap". |
 

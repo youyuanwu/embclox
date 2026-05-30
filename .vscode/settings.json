@@ -8,5 +8,9 @@
         "embclox-hyperv-example",
         "--exclude",
         "embclox-tulip-example"
-    ]
+    ],
+    "chat.tools.terminal.autoApprove": {
+        "cargo build": true,
+        "cargo test": true
+    }
 }

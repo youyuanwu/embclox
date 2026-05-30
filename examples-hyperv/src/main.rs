@@ -144,6 +144,8 @@ unsafe extern "C" fn kmain() -> ! {
                 func: 0,
                 vendor: 0,
                 device: 0,
+                class: 0,
+                subclass: 0,
             },
             0x00,
         );

@@ -285,6 +285,21 @@ name = "embclox-dma"
 version = "0.1.0"
 
 [[package]]
+name = "embclox-driver"
+version = "0.1.0"
+dependencies = [
+ "embassy-net-driver",
+ "embclox-core",
+ "embclox-dma",
+ "embclox-e1000",
+ "embclox-hal-x86",
+ "embclox-hyperv",
+ "embclox-tulip",
+ "log",
+ "x86_64",
+]
+
+[[package]]
 name = "embclox-e1000"
 version = "0.1.0"
 dependencies = [

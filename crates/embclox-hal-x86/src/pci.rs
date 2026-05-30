@@ -1,20 +1,28 @@
+use alloc::vec::Vec;
 use log::*;
 use x86_64::instructions::port::Port;
 
 const PCI_CONFIG_ADDR: u16 = 0xCF8;
 const PCI_CONFIG_DATA: u16 = 0xCFC;
 const PCI_COMMAND: u8 = 0x04;
+const PCI_HEADER_TYPE: u8 = 0x0E;
+const PCI_CLASS_REV: u8 = 0x08;
 
 /// x86 PCI bus scanner using I/O ports 0xCF8/0xCFC.
 pub struct PciBus;
 
 /// A PCI device found during bus enumeration.
+#[derive(Debug, Clone, Copy)]
 pub struct PciDevice {
     pub bus: u8,
     pub dev: u8,
     pub func: u8,
     pub vendor: u16,
     pub device: u16,
+    /// PCI class code (high byte of register 0x08+3).
+    pub class: u8,
+    /// PCI subclass (next byte down).
+    pub subclass: u8,
 }
 
 impl PciBus {
@@ -29,12 +37,15 @@ impl PciBus {
             let d = ((id >> 16) & 0xFFFF) as u16;
             if v == vendor && d == device_id {
                 info!("PCI: found {:04x}:{:04x} at 0:{}:0", v, d, dev);
+                let (class, subclass) = read_class(0, dev, 0);
                 return Some(PciDevice {
                     bus: 0,
                     dev,
                     func: 0,
                     vendor: v,
                     device: d,
+                    class,
+                    subclass,
                 });
             }
         }
@@ -52,16 +63,49 @@ impl PciBus {
             let d = ((id >> 16) & 0xFFFF) as u16;
             if v == vendor && device_ids.contains(&d) {
                 info!("PCI: found {:04x}:{:04x} at 0:{}:0", v, d, dev);
+                let (class, subclass) = read_class(0, dev, 0);
                 return Some(PciDevice {
                     bus: 0,
                     dev,
                     func: 0,
                     vendor: v,
                     device: d,
+                    class,
+                    subclass,
                 });
             }
         }
         None
+    }
+
+    /// Enumerate every PCI device reachable from bus 0.
+    ///
+    /// Walks bus 0 device 0..32, descending into functions 1..8 only on
+    /// multi-function devices (header-type bit 7). Bus-to-bus bridge
+    /// traversal is not yet supported \u2014 enough for QEMU q35/pc and
+    /// Hyper-V Gen1, which both keep all endpoint NICs on bus 0.
+    pub fn enumerate(&self) -> Vec<PciDevice> {
+        let mut out = Vec::new();
+        for dev in 0..32u8 {
+            let id0 = pci_read32(0, dev, 0, 0);
+            if id0 == 0xFFFF_FFFF {
+                continue;
+            }
+            push_dev(&mut out, 0, dev, 0, id0);
+            // Multi-function device? Bit 7 of header type at offset 0x0E.
+            let header = (pci_read32(0, dev, 0, PCI_HEADER_TYPE & 0xFC)
+                >> ((PCI_HEADER_TYPE & 3) * 8)) as u8;
+            if header & 0x80 != 0 {
+                for func in 1..8u8 {
+                    let idf = pci_read32(0, dev, func, 0);
+                    if idf == 0xFFFF_FFFF {
+                        continue;
+                    }
+                    push_dev(&mut out, 0, dev, func, idf);
+                }
+            }
+        }
+        out
     }
 
     /// Enable PCI bus mastering, memory space, and I/O space for a device.
@@ -133,4 +177,30 @@ fn pci_write16(bus: u8, dev: u8, func: u8, offset: u8, val: u16) {
     let mask = !(0xFFFFu32 << shift);
     let new = (old & mask) | ((val as u32) << shift);
     pci_write32(bus, dev, func, offset & 0xFC, new);
+}
+
+fn read_class(bus: u8, dev: u8, func: u8) -> (u8, u8) {
+    let w = pci_read32(bus, dev, func, PCI_CLASS_REV);
+    let class = ((w >> 24) & 0xFF) as u8;
+    let subclass = ((w >> 16) & 0xFF) as u8;
+    (class, subclass)
+}
+
+fn push_dev(out: &mut Vec<PciDevice>, bus: u8, dev: u8, func: u8, id: u32) {
+    let vendor = (id & 0xFFFF) as u16;
+    let device = ((id >> 16) & 0xFFFF) as u16;
+    let (class, subclass) = read_class(bus, dev, func);
+    info!(
+        "PCI: enum {:04x}:{:04x} at {}:{}:{} class={:#04x}/{:#04x}",
+        vendor, device, bus, dev, func, class, subclass
+    );
+    out.push(PciDevice {
+        bus,
+        dev,
+        func,
+        vendor,
+        device,
+        class,
+        subclass,
+    });
 }

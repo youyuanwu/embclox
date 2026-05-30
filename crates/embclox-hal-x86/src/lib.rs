@@ -17,10 +17,12 @@ pub mod pit;
 pub mod runtime;
 pub mod serial;
 pub mod time;
+pub mod vector_alloc;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
 pub use limine_boot::LimineBootInfo;
+pub use vector_alloc::{CpuId, InstalledIsr, VectorAllocator};
 
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 
