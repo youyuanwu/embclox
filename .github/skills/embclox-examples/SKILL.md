@@ -163,8 +163,8 @@ cmake --build build --target hyperv-vhd      # -> build/hyperv.vhd  (Azure)
 cmake --build build --target kernel-image    # -> build/kernel.iso (unified)
 cmake --build build --target kernel-vhd      # -> build/kernel.vhd  (Azure)
 
-# Run all CI tests (7 currently: e1000-echo, unit, tulip-{boot,echo},
-# hyperv-boot, kernel-echo-{e1000,tulip}):
+# Run all CI tests (6 currently: e1000-echo, unit, tulip-{boot,echo},
+# kernel-echo-{e1000,tulip}):
 ctest --test-dir build --output-on-failure
 ```
 

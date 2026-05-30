@@ -39,7 +39,7 @@ add_custom_target(check
     COMMENT "Formatting and linting all crates"
 )
 
-# e1000 example + unit tests
+# e1000 example
 add_subdirectory(examples-e1000)
 
 # Tulip example (Limine boot, ISO/VHD)
@@ -50,6 +50,9 @@ add_subdirectory(examples-hyperv)
 
 # Unified kernel example (Limine boot, ISO; PCI + VMBus via the driver registry)
 add_subdirectory(examples-kernel)
+
+# Shared unit-test harness (Limine boot, ISO; e1000 NIC + isa-debug-exit)
+add_subdirectory(qemu-tests/unit)
 
 # Aggregate: build every bootable image (ISOs + VHDs)
 add_custom_target(images

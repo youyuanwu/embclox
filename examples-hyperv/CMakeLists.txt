@@ -85,14 +85,8 @@ add_custom_target(qemu-hyperv
     COMMENT "Running Hyper-V example in QEMU (UEFI, no VMBus)"
 )
 
-# --- CTest: boot test on QEMU (verifies Limine boot, non-Hyper-V path) ---
-
-add_test(NAME hyperv-boot
-    COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/qemu-test.sh
-        ${HYPERV_ISO}
-        --iso
-        --log-match "HYPERV BOOT PASSED"
-        --timeout 15
-        --qemu-args "-m 256M"
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-)
+# No ctest lane: the kernel-echo-{e1000,tulip} lanes in
+# examples-kernel are a strict superset (boot + stack + TCP echo);
+# a bare Limine-boot smoke against this binary would only re-prove
+# what they already cover. See docs/design/driver-model.md
+# "Phase 3 / 3b".

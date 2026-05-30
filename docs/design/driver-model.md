@@ -1,6 +1,15 @@
 # Driver model: bus / driver / device abstraction
 
-## Status: proposal
+## Status: implemented (May 2026)
+
+Phases 1 and 2 of the migration path below are shipped in the tree:
+[`crates/embclox-driver`](../../crates/embclox-driver/) implements the
+registry; [`examples-kernel`](../../examples-kernel/) is the unified
+binary; the existing per-NIC `examples-*` crates remain as one-driver
+references. Verified end-to-end on QEMU (e1000 + tulip ctest lanes)
+and on real Hyper-V Gen1 (NetVSC probe + RNDIS + TCP echo). Phase 3
+(retire the per-NIC examples) is deliberately left open — see the
+bottom of this doc.
 
 Today each `examples-*` crate hard-codes one driver: PCI scan for
 `0x8086:0x100E`, or `0x1011:0x0009`, or `embclox_hyperv::init` for
@@ -65,10 +74,10 @@ ChannelHandle)`. Forcing a single `Device` enum would either lose
 information or require every driver to downcast.
 
 Both device types must be `Clone` (the boot flow consumes the
-enumeration via `.iter().cloned()`). Today's `PciDevice` in
+enumeration via `.iter().cloned()`). `PciDevice` in
 [crates/embclox-hal-x86/src/pci.rs](../../crates/embclox-hal-x86/src/pci.rs)
-does not yet derive `Clone` — added as part of Phase 1 (see
-"Phase 1 HAL prerequisites" below).
+derives `Clone + Copy + Debug` and carries `class` / `subclass`
+(shipped in Phase 1 \u2014 see "Migration path" below).
 
 ### `DeviceInfo` — deferred
 
@@ -917,54 +926,173 @@ grow a `remove()` method, but nothing in current examples needs it.
 
 ## Migration path
 
-Two phases, each independently shippable. Limine standardisation
-(formerly "Phase 0") is already in the tree — see "Bootloader".
+Three phases. **Phases 1 and 2 are shipped**; Phase 3 is optional and
+open. Limine standardisation (formerly "Phase 0") was already in the
+tree before this work began — see "Bootloader".
 
-### Phase 1 — HAL prerequisites + driver-model crate
+### Phase 1 — HAL prerequisites + driver-model crate — ✅ shipped
 
-The driver model depends on three small HAL additions and one
-trait-impl deficit that don't exist today:
+Three HAL additions plus the new crate:
 
-1. **`PciBus::enumerate() -> &[PciDevice]`** in
+1. **`PciBus::enumerate() -> Vec<PciDevice>`** —
    [crates/embclox-hal-x86/src/pci.rs](../../crates/embclox-hal-x86/src/pci.rs).
-   Today's scanner only exposes `find_device` / `find_device_any`
-   and walks bus 0 / dev 0..32 / func 0 only. The registry needs a
-   full scan with multi-function and (later) multi-bus support, and
-   wants a cached slice it can hand out by reference.
-2. **`#[derive(Clone)]` on `PciDevice`** — required by the boot
-   flow's `pci.enumerate().iter().cloned()`. Trivial; `PciDevice`
-   is `Copy`-eligible (all `u8` / `u16` fields).
-3. **`VectorAllocator`, `CpuId`, and `InstalledIsr`** in
-   `embclox-hal-x86`. None exist today; per the "ISR registration"
-   and "SMP-forward design choices" sections, the allocator
-   consumes a `&[u8]` exclusion list and returns `InstalledIsr {
-   vector, cpu_id: CpuId }`. On the current single-CPU runtime,
-   `CpuId::BSP` is the only variant and `apic_id()` returns the BSP
-   APIC ID.
-4. **`crates/embclox-driver`** with `Bus`, `PciDriver`,
-   `VmBusDriver`, `EmbcloxNic`, `DynNic`, `ProbeCtx`,
-   `DriverRegistry`, `ProbeError`, `ProbedNic`, and
-   `register_default_drivers`. Each existing driver crate gains a
-   small `driver` module exposing a marker type (e.g.
-   `pub struct E1000Driver;`) implementing the matching trait and
-   an `impl EmbcloxNic` block forwarding to the existing `*Embassy`
-   adapter.
+   Walks bus 0 dev 0..32 with multi-function fan-out; `PciDevice`
+   also gained `class` / `subclass` so class-code matches work.
+2. **`#[derive(Clone, Copy, Debug)]` on `PciDevice`** — same file.
+3. **`vector_alloc` module** —
+   [crates/embclox-hal-x86/src/vector_alloc.rs](../../crates/embclox-hal-x86/src/vector_alloc.rs).
+   `CpuId::Bsp` (single-variant today), `InstalledIsr { vector,
+   cpu_id }`, `VectorAllocator::{new, allocate, free_count}` with
+   the explicit `&[u8]` reservation list.
+4. **[`crates/embclox-driver`](../../crates/embclox-driver/)** —
+   `Bus`, `PciDriver`, `VmBusDriver`, `EmbcloxNic`, `DynNic`,
+   `ProbeCtx`, `DriverRegistry`, `ProbeError`, `ProbedNic`,
+   `probe_all`, `PROBE_BUDGET`, `register_default_drivers`. The
+   three in-tree NICs each got a small `drivers/{e1000,tulip,netvsc}.rs`
+   wrapper inside this crate (marker type + `EmbcloxNic` impl + static
+   ISR + private static slot), so the existing per-NIC crates were
+   not touched.
 
-No `examples-*` crate changes in this phase.
+### Phase 2 — `examples-kernel` — ✅ shipped
 
-### Phase 2 — `examples-kernel`
+[`examples-kernel/src/main.rs`](../../examples-kernel/src/main.rs)
+is the unified binary. `kmain` brings up the HAL, optionally
+initialises Hyper-V VMBus (non-fatal), constructs a
+`VectorAllocator` with the right reservations, registers all default
+drivers, runs `probe_all`, picks the lowest-priority `ProbedNic`,
+wraps it in `DynNic`, and hands it to `embassy_net::Stack` + a TCP
+echo task on port 1234.
 
-Add `examples-kernel` that calls `register_default_drivers()` then
-runs the registry probe loop. Existing `examples-*` crates are
-untouched. CI grows one more `qemu` lane: boot `examples-kernel`
-with `-device e1000`, then with `-device tulip`, expect each to
-print the matching driver name and a TCP echo. The existing
-Hyper-V CI lane covers the NetVSC branch.
+CI / image artefacts:
 
-### Phase 3 — (Optional) Retire single-driver examples
+- `kernel-image` — generic ISO (`net=static ip=10.0.2.15/24 gw=10.0.2.2`,
+  QEMU SLIRP defaults).
+- `kernel-hyperv-image` — ISO with the dedicated `embclox-test` vSwitch
+  IPs baked in (`192.168.234.50/24`), consumed by
+  `scripts/hyperv-boot-test.ps1`.
+- `kernel-vhd` — Azure Gen1 page-blob VHD with `net=dhcp`.
+- ctest lanes `kernel-echo-e1000` and `kernel-echo-tulip` boot the same
+  ISO against different QEMU `-device` flags and verify a TCP echo
+  round-trip.
+- Verified manually on real Hyper-V Gen1: Boot / VMBus / NetVSC PASSED,
+  TCP echo VERIFIED via `scripts/hyperv-boot-test.ps1`.
 
-Only worth doing if the unified binary becomes the canonical
-reference. We probably keep them as documentation regardless.
+The Hyper-V `scripts/hyperv-boot-test.ps1` default `-Iso` and the
+`tests/infra/` Azure recipes now point at the unified `kernel.*`
+artefacts; the per-NIC `examples-hyperv` paths remain available as
+minimal one-driver references.
+
+### Phase 3 — (Optional) Retire single-driver examples — open
+
+The unified `examples-kernel` is the canonical reference going
+forward. The per-NIC `examples-e1000` / `examples-tulip` /
+`examples-hyperv` crates still exist as small, one-driver references
+that newcomers can read in one sitting; their ctest lanes also
+provide a per-driver regression target.
+
+#### When to execute
+
+Retire them only when either trigger fires:
+
+- **Drift signal.** One of the per-NIC binaries fails to compile or
+  boot because somebody touched the HAL and didn't update them.
+  That's the maintenance-cost-exceeds-value point the design
+  anticipates.
+- **Pedagogical value subsumed.** Readers stop reaching for
+  `examples-e1000/src/main.rs` because the per-driver wrapper at
+  `crates/embclox-driver/src/drivers/e1000.rs` (~60 lines) is now
+  the obvious one-driver read.
+
+Until one of those happens, **leave them in place** — they cost
+~1000 LoC + 9 CMake targets + 4 ctest lanes + 3 CI clippy lanes,
+which is small relative to the regression coverage they buy.
+
+#### Inventory
+
+| Crate | LoC main.rs | CMake targets | ctest lanes | Owns also |
+|-------|------------:|---------------|-------------|-----------|
+| `examples-e1000` | ~250 | `e1000-{build,image}`, `qemu-e1000`, **`unit-test-{build,image}`** | `e1000-echo`, **`unit`** | the shared unit-test ISO pipeline |
+| `examples-tulip` | ~280 | `tulip-{build,image,vhd}`, `qemu-tulip` | `tulip-boot`, `tulip-echo` | private `tulip_embassy.rs`, `LimineDmaAllocator` |
+| `examples-hyperv` | ~500 | `hyperv-{build,image,vhd}`, `qemu-hyperv` | `hyperv-boot` | `limine-azure.conf`, Azure infra references (already redirected to `kernel.vhd`) |
+
+#### Substeps, ordered by dependency + risk
+
+**3a. Move unit-tests out of `examples-e1000/CMakeLists.txt`** —
+prerequisite, zero-risk, can land any time. The shared
+`unit-test-build` / `unit-test-image` / `unit` ctest lane currently
+lives inside `examples-e1000/CMakeLists.txt`. Move it verbatim into
+`qemu-tests/unit/CMakeLists.txt` and `add_subdirectory(qemu-tests/unit)`
+from the root.
+
+**3b. Decide what to do with `hyperv-boot`.** It's a QEMU UEFI smoke
+that log-matches `HYPERV BOOT PASSED`. The kernel binary emits the
+same marker. Two options:
+
+- Drop it entirely — `kernel-echo-{e1000,tulip}` are a strict
+  superset (boot + stack + TCP round-trip), so the coverage is
+  already there. **Recommended.**
+- Add a `kernel-boot` lane mirroring it — only worth doing if we
+  want a fast (<15s) smoke that doesn't pay the embassy-stack tax.
+
+**3c. Retire `examples-hyperv`** — biggest payoff first (~500 LoC,
+most likely to drift because the inline SINT2 ISR / VMBus-init code
+in its `main.rs` is duplicated by the kernel).
+
+1. Delete `examples-hyperv/` directory.
+2. `Cargo.toml`: remove from `members`.
+3. Root `CMakeLists.txt`: remove `add_subdirectory(examples-hyperv)`;
+   remove `hyperv-image` / `hyperv-vhd` from `images` aggregate;
+   remove the `examples-hyperv` clippy line from `check`.
+4. `.github/workflows/ci.yml`: remove the "Clippy hyperv example"
+   lane.
+5. Apply 3b's decision to `hyperv-boot`.
+6. `tests/infra/README.md`: collapse the "Which VHD?" table back to
+   two rows (`kernel.vhd`, `tulip.vhd`); drop "one-driver reference"
+   language for the Azure path.
+7. `scripts/hyperv-boot-test.ps1`: remove the "you can also pass
+   `-Iso build/hyperv.iso`" escape hatch from the header.
+
+**3d. Retire `examples-tulip`.** Same shape. Extras:
+
+- `scripts/hyperv-tulip-test.ps1` is a tulip-on-Hyper-V manual
+  harness. Either delete it (rare combo) or repoint it at
+  `kernel-hyperv.iso` if there's still a use case.
+- `examples-tulip/src/tulip_embassy.rs` is duplicated work that
+  the registry already owns; deleting the example deletes it.
+
+**3e. Retire `examples-e1000`** — last. Depends on 3a. Same shape.
+
+#### What we keep regardless
+
+- `crates/embclox-{e1000,tulip,hyperv}` — the device-driver
+  implementations; only the binary wrappers retire.
+- `crates/embclox-driver/src/drivers/{e1000,tulip,netvsc}.rs` —
+  the registry-aware per-NIC wrappers; they become the canonical
+  one-driver read.
+- `scripts/hyperv-boot-test.ps1` and the `tests/infra/` Azure
+  pipeline — already point at the unified `kernel.*` artefacts.
+
+#### Risks
+
+1. **Lost per-driver test isolation.** After retirement, the only
+   way to test "NetVSC works in isolation" is to manually disable
+   e1000/tulip registration in the kernel binary. Mitigation: if a
+   regression demands it, add a "minimal" kernel-test crate that
+   registers only one driver.
+2. **Pedagogical value.** A ~250-line one-driver `main.rs` is
+   easier to read in one sitting than `examples-kernel/src/main.rs`.
+   Mitigation: `crates/embclox-driver/src/drivers/e1000.rs` (~60
+   lines, just the driver wrapper) becomes the one-driver read.
+3. **Real-Hyper-V coverage.** Drops from "explicit hyperv-only
+   binary built every commit" to "Hyper-V tested only via the
+   unified kernel". Already true after the Phase 2 redirect; this
+   just makes it formal.
+
+#### Recommended order if the trigger fires
+
+3a + 3b first (zero-risk), then 3c (most LoC + most drift-prone),
+then 3d, then 3e. Each substep is independently shippable; no need
+to bundle.
 
 ## Trade-offs
 
