@@ -1,0 +1,106 @@
+# Unified kernel example: Limine boot, ISO image, QEMU tests.
+# Limine binaries are fetched in the root CMakeLists.txt.
+
+set(KERNEL_KERNEL_REL "target/${TARGET}/release/embclox-kernel-example")
+
+add_custom_target(kernel-build
+    COMMAND cargo build --release
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "Building kernel example (Limine BIOS+UEFI)"
+)
+
+# --- ISO image (for QEMU and local Hyper-V Gen1) ---
+
+set(KERNEL_ISO "${CMAKE_BINARY_DIR}/kernel.iso")
+
+add_custom_command(
+    OUTPUT ${KERNEL_ISO}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/kernel-iso/boot/limine
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/kernel-iso/EFI/BOOT
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${CMAKE_SOURCE_DIR}/${KERNEL_KERNEL_REL}
+        ${CMAKE_BINARY_DIR}/kernel-iso/boot/kernel
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${CMAKE_CURRENT_SOURCE_DIR}/limine.conf
+        ${CMAKE_BINARY_DIR}/kernel-iso/boot/limine/limine.conf
+    # UEFI boot files
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${LIMINE_BOOTX64}
+        ${CMAKE_BINARY_DIR}/kernel-iso/EFI/BOOT/BOOTX64.EFI
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${LIMINE_UEFI_CD}
+        ${CMAKE_BINARY_DIR}/kernel-iso/boot/limine/limine-uefi-cd.bin
+    # BIOS boot files (needed for Hyper-V Gen1)
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${LIMINE_BIOS_CD}
+        ${CMAKE_BINARY_DIR}/kernel-iso/boot/limine/limine-bios-cd.bin
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${LIMINE_BIOS_SYS}
+        ${CMAKE_BINARY_DIR}/kernel-iso/boot/limine/limine-bios.sys
+    COMMAND xorriso -as mkisofs
+        -b boot/limine/limine-bios-cd.bin
+        -no-emul-boot -boot-load-size 4 -boot-info-table
+        --efi-boot boot/limine/limine-uefi-cd.bin
+        -efi-boot-part --efi-boot-image --protective-msdos-label
+        ${CMAKE_BINARY_DIR}/kernel-iso -o ${KERNEL_ISO}
+        2>/dev/null
+    DEPENDS kernel-build ${LIMINE_BOOTX64} ${CMAKE_CURRENT_SOURCE_DIR}/limine.conf
+    COMMENT "Creating kernel BIOS+UEFI ISO image"
+)
+add_custom_target(kernel-image DEPENDS ${KERNEL_ISO})
+
+# --- QEMU run targets ---
+
+# Default: e1000 (matches limine.conf's static 10.0.2.15/24).
+add_custom_target(qemu-kernel
+    COMMAND qemu-system-x86_64
+        -machine q35
+        -no-reboot
+        -serial mon:stdio
+        -display none
+        -drive if=pflash,format=raw,readonly=on,file=${OVMF_CODE}
+        -cdrom ${KERNEL_ISO}
+        -netdev user,id=net0,hostfwd=tcp::5555-:1234
+        -device e1000,netdev=net0
+        -m 256M
+    DEPENDS kernel-image
+    COMMENT "Running kernel example in QEMU (UEFI + e1000 NIC)"
+)
+
+# Tulip (DEC 21140) variant.
+add_custom_target(qemu-kernel-tulip
+    COMMAND qemu-system-x86_64
+        -machine q35
+        -no-reboot
+        -serial mon:stdio
+        -display none
+        -drive if=pflash,format=raw,readonly=on,file=${OVMF_CODE}
+        -cdrom ${KERNEL_ISO}
+        -netdev user,id=net0,hostfwd=tcp::5555-:1234
+        -device tulip,netdev=net0
+        -m 256M
+    DEPENDS kernel-image
+    COMMENT "Running kernel example in QEMU (UEFI + tulip NIC)"
+)
+
+# --- CTest tests ---
+
+add_test(NAME kernel-echo-e1000
+    COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/qemu-test.sh
+        ${KERNEL_ISO}
+        --iso
+        --probe tcp:5555:hello-embclox
+        --timeout 30
+        --qemu-args "-netdev user,id=net0,hostfwd=tcp::5555-:1234 -device e1000,netdev=net0 -m 256M"
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+
+add_test(NAME kernel-echo-tulip
+    COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/qemu-test.sh
+        ${KERNEL_ISO}
+        --iso
+        --probe tcp:5555:hello-embclox
+        --timeout 30
+        --qemu-args "-netdev user,id=net0,hostfwd=tcp::5555-:1234 -device tulip,netdev=net0 -m 256M"
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)

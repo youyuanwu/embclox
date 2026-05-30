@@ -33,6 +33,8 @@ add_custom_target(check
         --target ${TARGET} -- -D warnings
     COMMAND cargo clippy --manifest-path examples-hyperv/Cargo.toml
         --target ${TARGET} -- -D warnings
+    COMMAND cargo clippy --manifest-path examples-kernel/Cargo.toml
+        --target ${TARGET} -- -D warnings
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Formatting and linting all crates"
 )
@@ -46,6 +48,9 @@ add_subdirectory(examples-tulip)
 # Hyper-V example (Limine boot, ISO)
 add_subdirectory(examples-hyperv)
 
+# Unified kernel example (Limine boot, ISO; PCI + VMBus via the driver registry)
+add_subdirectory(examples-kernel)
+
 # Aggregate: build every bootable image (ISOs + VHDs)
 add_custom_target(images
     DEPENDS
@@ -55,5 +60,6 @@ add_custom_target(images
         tulip-vhd
         hyperv-image
         hyperv-vhd
+        kernel-image
     COMMENT "Building all bootable images (ISOs + VHDs)"
 )
