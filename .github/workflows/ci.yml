@@ -50,13 +50,13 @@ jobs:
         run: cargo clippy -- -D warnings
 
       - name: Install QEMU and OVMF
-        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf netcat-openbsd xorriso
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf netcat-openbsd xorriso mtools dosfstools qemu-utils
 
-      - name: QEMU tests
-        run: |
-          cmake -B build
-          cmake --build build --target e1000-image
-          cmake --build build --target unit-test-image
-          cmake --build build --target tulip-image
-          cmake --build build --target hyperv-image
-          ctest --test-dir build --output-on-failure
+      - name: Configure CMake
+        run: cmake -B build
+
+      - name: Build images
+        run: cmake --build build --target images
+
+      - name: Run QEMU tests
+        run: ctest --test-dir build --output-on-failure

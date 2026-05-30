@@ -45,3 +45,15 @@ add_subdirectory(examples-tulip)
 
 # Hyper-V example (Limine boot, ISO)
 add_subdirectory(examples-hyperv)
+
+# Aggregate: build every bootable image (ISOs + VHDs)
+add_custom_target(images
+    DEPENDS
+        e1000-image
+        unit-test-image
+        tulip-image
+        tulip-vhd
+        hyperv-image
+        hyperv-vhd
+    COMMENT "Building all bootable images (ISOs + VHDs)"
+)
