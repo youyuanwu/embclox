@@ -41,10 +41,6 @@ jobs:
         working-directory: qemu-tests/unit
         run: cargo clippy -- -D warnings
 
-      - name: Clippy tulip example
-        working-directory: examples-tulip
-        run: cargo clippy -- -D warnings
-
       - name: Clippy kernel example
         working-directory: examples-kernel
         run: cargo clippy -- -D warnings

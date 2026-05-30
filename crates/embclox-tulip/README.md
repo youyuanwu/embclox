@@ -23,4 +23,5 @@ Caller is responsible for:
 - ISR that ack/clears CSR5 status bits + wakes the embassy waker
 
 For the embassy-net `Driver` impl + canonical wiring, see
-`examples-tulip/src/tulip_embassy.rs` and `examples-tulip/src/main.rs`.
+`examples-kernel/src/main.rs` and
+`crates/embclox-driver/src/drivers/tulip.rs`.

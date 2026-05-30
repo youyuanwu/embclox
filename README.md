@@ -15,7 +15,6 @@ targeting QEMU and Hyper-V (including Azure Gen1).
 | [`crates/embclox-hyperv/`](crates/embclox-hyperv/README.md) | Hyper-V VMBus + NetVSC driver |
 | [`crates/embclox-core/`](crates/embclox-core/README.md) | Shared driver glue (e1000_embassy, BootDmaAllocator, etc.) |
 | [`examples-e1000/`](examples-e1000/README.md) | Limine boot, e1000 NIC, QEMU/KVM TCP echo (one-driver reference) |
-| [`examples-tulip/`](examples-tulip/README.md) | Limine boot, Tulip NIC, QEMU SLIRP TCP echo (one-driver reference) |
 | [`examples-kernel/`](examples-kernel/README.md) | Unified binary: registry picks e1000/tulip/NetVSC at boot. Canonical reference; targets QEMU + local Hyper-V + Azure Gen1 |
 | `qemu-tests/unit/` | no_std unit tests run inside QEMU |
 | [`tests/infra/`](tests/infra/README.md) | Bicep templates for Azure Gen1 deployment |
@@ -26,7 +25,7 @@ targeting QEMU and Hyper-V (including Azure Gen1).
 ```bash
 cmake -B build
 cmake --build build --target images
-ctest --test-dir build --output-on-failure   # 6 tests, ~65s
+ctest --test-dir build --output-on-failure   # 4 tests, ~40s
 ```
 
 Per-crate (faster):

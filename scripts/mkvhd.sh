@@ -8,10 +8,10 @@
 #
 # Example:
 #   scripts/mkvhd.sh \
-#       target/x86_64-unknown-none/release/embclox-tulip-example \
+#       target/x86_64-unknown-none/release/embclox-kernel-example \
 #       build/_deps/limine-src \
-#       examples-tulip/limine.conf \
-#       build/tulip.vhd
+#       examples-kernel/limine-azure.conf \
+#       build/kernel.vhd
 
 set -euo pipefail
 

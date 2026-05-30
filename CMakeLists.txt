@@ -29,8 +29,6 @@ add_custom_target(check
         --target ${TARGET} -- -D warnings
     COMMAND cargo clippy --manifest-path qemu-tests/unit/Cargo.toml
         --target ${TARGET} -- -D warnings
-    COMMAND cargo clippy --manifest-path examples-tulip/Cargo.toml
-        --target ${TARGET} -- -D warnings
     COMMAND cargo clippy --manifest-path examples-kernel/Cargo.toml
         --target ${TARGET} -- -D warnings
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -39,9 +37,6 @@ add_custom_target(check
 
 # e1000 example
 add_subdirectory(examples-e1000)
-
-# Tulip example (Limine boot, ISO/VHD)
-add_subdirectory(examples-tulip)
 
 # Unified kernel example (Limine boot, ISO; PCI + VMBus via the driver registry)
 add_subdirectory(examples-kernel)
@@ -54,8 +49,6 @@ add_custom_target(images
     DEPENDS
         e1000-image
         unit-test-image
-        tulip-image
-        tulip-vhd
         kernel-image
         kernel-hyperv-image
         kernel-vhd

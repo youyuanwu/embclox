@@ -20,15 +20,11 @@ imports stay fast and free.
 
 ## Which VHD?
 
-| VHD | Driver model | Use on Azure? |
-|-----|-------|---------------|
-| `build/kernel.vhd` | Unified registry (picks NetVSC at boot) | ✅ **yes** — only supported path |
-| `build/tulip.vhd` | DEC 21140 (PCI) | ❌ no — Azure Gen1 doesn't expose Tulip on PCI |
-
-Azure Gen1 VMs only expose chipset bridges + a Hyper-V synthetic VGA on
-PCI. Networking goes through VMBus NetVSC, so any kernel that wants
-network on Azure must include the NetVSC driver. `kernel.vhd` is the
-only artefact that does.
+`build/kernel.vhd` is the only artefact suitable for Azure Gen1.
+Azure Gen1 VMs only expose chipset bridges + a Hyper-V synthetic VGA
+on PCI — no NIC. Networking goes through VMBus NetVSC, so any kernel
+that wants network on Azure must include the NetVSC driver, and
+`kernel.vhd` is the only one that does.
 
 ## Prerequisites
 

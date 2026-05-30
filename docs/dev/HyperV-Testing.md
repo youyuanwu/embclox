@@ -7,8 +7,8 @@ why we **don't** use the Default Switch.
 
 Use the dedicated `embclox-test` Internal vSwitch. Run
 `scripts/hyperv-setup-vswitch.ps1` once as Administrator. Thereafter
-`scripts/hyperv-boot-test.ps1` and `scripts/hyperv-tulip-test.ps1` will
-attach test VMs to it automatically.
+`scripts/hyperv-boot-test.ps1` will attach test VMs to it
+automatically.
 
 The host-side IP on `vEthernet (embclox-test)` is `192.168.234.1/24`;
 test VMs use static `192.168.234.50/24`. There is no DHCP server on
@@ -154,31 +154,18 @@ powershell.exe -ExecutionPolicy Bypass -File scripts/hyperv-boot-test.ps1 \
 
 ## Where DHCP testing belongs
 
-DHCP-via-embassy/smoltcp is **already covered by the Tulip QEMU test**:
-
-```sh
-# QEMU SLIRP user network — has a built-in, well-behaved DHCP server.
-ctest --test-dir build -R tulip-echo
-```
-
-QEMU SLIRP DHCP is the right place to exercise the smoltcp DHCP code
-path because:
-
-- SLIRP is a standard, predictable DHCP server (same code that Linux
-  test farms use).
-- It has none of the ICS pre-allocation behavior.
-- The test runs on every CI build with no host-state dependency.
-
-For Hyper-V we test the **NIC driver and embassy adapter** path with a
-known-good static configuration, not the DHCP client. This is a
-deliberate split:
+DHCP-via-embassy/smoltcp is **covered by Azure**: `kernel-vhd` boots
+with `cmdline: net=dhcp`, and Azure has a production-grade DHCP
+server. The local Hyper-V test path deliberately uses static
+configuration on the dedicated `embclox-test` vSwitch (which has no
+DHCP server) because layering local DHCP onto Internal vSwitches is
+flaky.
 
 | Test target | Exercises | Where |
 |-------------|-----------|-------|
-| Tulip QEMU | smoltcp + embassy + DHCP + Tulip MMIO | CI (qemu-system-x86_64) |
-| Tulip Hyper-V (legacy NIC) | Tulip MMIO + Hyper-V vSwitch L2 | dev (manual) |
-| NetVSC Hyper-V | VMBus + NVSP + RNDIS + embassy | dev (manual) |
-| NetVSC Azure | VMBus + Azure DHCP + production stack | future (`tests/infra/main.bicep`) |
+| QEMU SLIRP (kernel-echo-{e1000,tulip}) | smoltcp + embassy + e1000/tulip MMIO + static IP | CI (qemu-system-x86_64) |
+| Local Hyper-V (kernel-hyperv.iso) | VMBus + NVSP + RNDIS + embassy + static IP | dev (manual) |
+| Azure Gen1 (kernel.vhd) | VMBus + Azure DHCP + production stack | manual via `tests/infra/` |
 
 ## Switching to DHCP at boot time
 

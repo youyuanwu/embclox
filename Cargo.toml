@@ -4,7 +4,6 @@ resolver = "2"
 members = [
     "examples-e1000",
     "examples-kernel",
-    "examples-tulip",
     "qemu-tests/unit",
     "crates/embclox-async",
     "crates/embclox-core",

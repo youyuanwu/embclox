@@ -23,8 +23,10 @@ implementation:
 - **`examples-e1000`, `examples-kernel`, and `qemu-tests/unit`** use
   `BootDmaAllocator` (heap-backed, translates kernel virt→phys via
   the offsets that `embclox_hal_x86::init` reads from Limine).
-- **`examples-tulip`** uses a bump allocator over the Limine
-  HHDM-mapped sub-4GB physical memory pool.
+- **`examples-kernel`'s tulip code path** uses the same
+  `BootDmaAllocator`. (The previous standalone `examples-tulip` had
+  its own bump allocator over the Limine HHDM-mapped sub-4GB pool;
+  that crate is retired.)
 
 Keeping the allocator out of the driver crates lets each example pick
 the strategy that matches its DMA footprint.

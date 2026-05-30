@@ -400,28 +400,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "embclox-tulip-example"
-version = "0.1.0"
-dependencies = [
- "critical-section",
- "embassy-executor",
- "embassy-net",
- "embassy-net-driver",
- "embassy-sync",
- "embassy-time",
- "embassy-time-driver",
- "embclox-dma",
- "embclox-hal-x86",
- "embclox-tulip",
- "embedded-io-async",
- "heapless",
- "limine",
- "log",
- "static_cell",
- "x86_64",
-]
-
-[[package]]
 name = "embclox-unit-tests"
 version = "0.1.0"
 dependencies = [

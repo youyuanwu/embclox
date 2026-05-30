@@ -161,7 +161,7 @@ Key findings:
 - **QEMU**: Cannot test VMBus (no Hyper-V emulation). CPUID detection
   skips VMBus init. Existing QEMU tests unaffected.
 - **Local Hyper-V Gen1**: BIOS boot, COM1 serial via named pipe.
-  Use `scripts/hyperv-tulip-test.ps1` as reference.
+  Use `scripts/hyperv-boot-test.ps1` against `build/kernel-hyperv.iso`.
 - **Local Hyper-V Gen2**: UEFI boot, no serial — crash-checkpoint
   debugging only.
 - **Azure Gen1**: VHD boot via `tests/infra/main.bicep`, serial

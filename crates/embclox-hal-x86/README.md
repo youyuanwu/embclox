@@ -81,8 +81,7 @@ before the embassy executor is up.
   [`embclox-driver`](../embclox-driver/README.md) registry. Canonical
   reference for QEMU + local Hyper-V + Azure Gen1.
 - `examples-e1000` \u2014 Intel e1000 NIC on QEMU (one-driver reference).
-- `examples-tulip` \u2014 DEC Tulip NIC on QEMU + Hyper-V Gen1 (one-driver
-  reference).
+
 - `qemu-tests/unit` \u2014 host-side HAL/driver test harness.
 
 All four boot via Limine (BIOS+UEFI ISO from `cmake --build build --target

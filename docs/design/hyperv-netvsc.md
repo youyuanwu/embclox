@@ -84,7 +84,7 @@ behind the dedicated Internal vSwitch.
 
 | Environment | NIC | Network | Use |
 |-------------|-----|---------|-----|
-| QEMU SLIRP | Tulip (PCI) | DHCP | CI (smoltcp DHCP coverage, `ctest -R tulip-echo`) |
+| QEMU SLIRP | Tulip (PCI) | static | CI (`ctest -R kernel-echo-tulip` exercises the registry + tulip wrapper) |
 | Local Hyper-V Gen1 | NetVSC (VMBus) | static, embclox-test vSwitch | Manual: `scripts/hyperv-boot-test.ps1` |
 | Azure Gen1 | NetVSC (VMBus) | DHCP | Manual: `tests/infra/{storage,vm}.bicep` (TCP echo verified end-to-end) |
 
@@ -231,8 +231,9 @@ accepts both and they keep us on the well-trodden Linux path:
 
 ## LAPIC timer ISR — implemented (shared runtime)
 
-The executor poll loops in all three examples (`examples-e1000`,
-`examples-tulip`, `examples-kernel`) used to busy-spin and call
+The executor poll loops in the original per-NIC examples
+(`examples-e1000`, the retired `examples-tulip`, the retired
+`examples-hyperv`) and `examples-kernel` used to busy-spin and call
 `on_timer_tick()` + a "belt-and-braces" `WAKER.wake()` every
 iteration. That defeated the waker pattern (every netvsc/tulip-bound
 task got marked ready every loop) and pinned each guest CPU at 100%
@@ -302,7 +303,7 @@ the IOAPIC — the device interrupt simply doesn't deliver. Network
 progress relied on the busy-loop wake. After this change, the 1 ms
 APIC tick advances embassy alarms, which causes embassy-net to
 re-poll smoltcp on schedule, which in turn polls the tulip device.
-For QEMU TCP echo this is sufficient (the ctest `tulip-echo` passes
+For QEMU TCP echo this is sufficient (the ctest `kernel-echo-tulip` passes
 in ~11 s). Wiring the IOAPIC for tulip is a future cleanup, not a
 correctness issue.
 

@@ -6,9 +6,9 @@ description: "How to develop bare-metal x86_64 Rust kernel examples in the embcl
 # embclox Example Development
 
 Use this skill when adding a new example kernel under `examples-<name>/`,
-modifying an existing one (`examples-e1000`, `examples-tulip`,
-`examples-kernel`), wiring a new device driver into an example, or
-investigating why a CI/Hyper-V/Azure run misbehaves.
+modifying an existing one (`examples-e1000`, `examples-kernel`),
+wiring a new device driver into an example, or investigating why a
+CI/Hyper-V/Azure run misbehaves.
 
 ## Repository orientation
 
@@ -24,7 +24,6 @@ embclox/
 │   ├── embclox-driver/      # bus/driver/device + EmbcloxNic + DriverRegistry
 │   └── embclox-core/        # shared driver glue (e1000_embassy, etc.)
 ├── examples-e1000/          # Limine boot, e1000 NIC, QEMU/KVM (one-driver ref)
-├── examples-tulip/          # Limine boot, Tulip NIC, QEMU SLIRP (one-driver ref)
 ├── examples-kernel/         # Unified: registry picks NIC at boot (QEMU + Hyper-V + Azure)
 ├── qemu-tests/unit/         # Limine-booted host-side test harness
 ├── tests/infra/             # bicep templates for Azure deployment
@@ -109,12 +108,13 @@ When adding a new NIC family:
    [examples-kernel/CMakeLists.txt](../../../examples-kernel/CMakeLists.txt)
    that boots `kernel.iso` against `-device <name>`.
 
-The per-NIC `examples-{e1000,tulip}` crates remain as small,
-focused references for one-driver bring-up and as the regression
-target for that single driver's wiring on QEMU. The Hyper-V/NetVSC
-path is exercised only through `examples-kernel` (the registry +
-the `embclox_driver::drivers::netvsc` wrapper); the standalone
-`examples-hyperv` binary was retired in Phase 3c.
+The per-NIC `examples-e1000` crate remains as a small, focused
+reference for one-driver bring-up and as the regression target for
+that single driver's wiring on QEMU. The tulip and NetVSC paths are
+exercised only through `examples-kernel` (the registry + the
+`embclox_driver::drivers::{tulip,netvsc}` wrappers); the standalone
+`examples-tulip` binary was retired in Phase 3d and
+`examples-hyperv` in Phase 3c.
 
 ## Network configuration
 
@@ -133,7 +133,7 @@ Each example provides its own `StaticDefaults` constant (e.g.
 
 For all examples, configure boot entries in `limine.conf` (and add it to
 the ISO custom-command `DEPENDS` so cmake rebuilds when the conf
-changes — see `examples-tulip/CMakeLists.txt`). Default boot entry
+changes — see `examples-kernel/CMakeLists.txt`). Default boot entry
 must match the CI environment:
 
 - QEMU SLIRP CI → `cmdline: net=dhcp` (SLIRP only routes 10.0.2.x)
@@ -159,7 +159,6 @@ cd examples-kernel && cargo build --release
 cmake -B build
 cmake --build build --target e1000-image          # -> build/e1000.iso
 cmake --build build --target unit-test-image      # -> build/unit-tests.iso
-cmake --build build --target tulip-image          # -> build/tulip.iso
 cmake --build build --target kernel-image         # -> build/kernel.iso (QEMU/generic)
 cmake --build build --target kernel-hyperv-image  # -> build/kernel-hyperv.iso (local Hyper-V vSwitch)
 cmake --build build --target kernel-vhd           # -> build/kernel.vhd  (Azure Gen1)
@@ -167,7 +166,7 @@ cmake --build build --target kernel-vhd           # -> build/kernel.vhd  (Azure 
 # Or all of the above:
 cmake --build build --target images
 
-# Run all CI tests (6 currently: e1000-echo, unit, tulip-{boot,echo},
+# Run all CI tests (4 currently: e1000-echo, unit,
 # kernel-echo-{e1000,tulip}):
 ctest --test-dir build --output-on-failure
 ```
@@ -183,10 +182,10 @@ Three layers, in increasing fidelity:
 ### 1. ctest (CI, ~60s total)
 
 `scripts/qemu-test.sh` boots an ISO under QEMU UEFI and either:
-- waits for a log line (`--log-match "TULIP INIT PASSED"`), or
-- probes a TCP port (`--probe tcp:5556:hello-tulip`).
+- waits for a log line (`--log-match "NETVSC INIT PASSED"`), or
+- probes a TCP port (`--probe tcp:5555:hello-embclox`).
 
-When adding a new example, mirror the pattern in `examples-tulip/CMakeLists.txt`:
+When adding a new example, mirror the pattern in `examples-e1000/CMakeLists.txt`:
 
 ```cmake
 add_test(NAME <name>-boot
