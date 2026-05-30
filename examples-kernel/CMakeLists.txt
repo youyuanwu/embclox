@@ -49,6 +49,65 @@ add_custom_command(
 )
 add_custom_target(kernel-image DEPENDS ${KERNEL_ISO})
 
+# --- ISO image (local Hyper-V Gen1 with embclox-test vSwitch IPs) ---
+
+set(KERNEL_HYPERV_ISO "${CMAKE_BINARY_DIR}/kernel-hyperv.iso")
+
+add_custom_command(
+    OUTPUT ${KERNEL_HYPERV_ISO}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/kernel-hyperv-iso/boot/limine
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/kernel-hyperv-iso/EFI/BOOT
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${CMAKE_SOURCE_DIR}/${KERNEL_KERNEL_REL}
+        ${CMAKE_BINARY_DIR}/kernel-hyperv-iso/boot/kernel
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${CMAKE_CURRENT_SOURCE_DIR}/limine-hyperv.conf
+        ${CMAKE_BINARY_DIR}/kernel-hyperv-iso/boot/limine/limine.conf
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${LIMINE_BOOTX64}
+        ${CMAKE_BINARY_DIR}/kernel-hyperv-iso/EFI/BOOT/BOOTX64.EFI
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${LIMINE_UEFI_CD}
+        ${CMAKE_BINARY_DIR}/kernel-hyperv-iso/boot/limine/limine-uefi-cd.bin
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${LIMINE_BIOS_CD}
+        ${CMAKE_BINARY_DIR}/kernel-hyperv-iso/boot/limine/limine-bios-cd.bin
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${LIMINE_BIOS_SYS}
+        ${CMAKE_BINARY_DIR}/kernel-hyperv-iso/boot/limine/limine-bios.sys
+    COMMAND xorriso -as mkisofs
+        -b boot/limine/limine-bios-cd.bin
+        -no-emul-boot -boot-load-size 4 -boot-info-table
+        --efi-boot boot/limine/limine-uefi-cd.bin
+        -efi-boot-part --efi-boot-image --protective-msdos-label
+        ${CMAKE_BINARY_DIR}/kernel-hyperv-iso -o ${KERNEL_HYPERV_ISO}
+        2>/dev/null
+    DEPENDS kernel-build ${LIMINE_BOOTX64} ${CMAKE_CURRENT_SOURCE_DIR}/limine-hyperv.conf
+    COMMENT "Creating kernel BIOS+UEFI ISO image (Hyper-V vSwitch IPs)"
+)
+add_custom_target(kernel-hyperv-image DEPENDS ${KERNEL_HYPERV_ISO})
+
+# --- VHD image (for Azure / local Hyper-V Gen1 deployment) ---
+#
+# Uses limine-azure.conf which boots the kernel with `cmdline: net=dhcp`.
+# Azure has a production-grade DHCP server, so DHCP is the right choice.
+# For local Hyper-V dev use the ISO instead — it defaults to static IP
+# on the dedicated `embclox-test` Internal vSwitch.
+
+set(KERNEL_VHD "${CMAKE_BINARY_DIR}/kernel.vhd")
+
+add_custom_command(
+    OUTPUT ${KERNEL_VHD}
+    COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/mkvhd.sh
+        ${CMAKE_SOURCE_DIR}/${KERNEL_KERNEL_REL}
+        ${limine_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/limine-azure.conf
+        ${KERNEL_VHD}
+    DEPENDS kernel-build ${CMAKE_CURRENT_SOURCE_DIR}/limine-azure.conf
+    COMMENT "Creating kernel VHD image (Azure Gen1, DHCP cmdline)"
+)
+add_custom_target(kernel-vhd DEPENDS ${KERNEL_VHD})
+
 # --- QEMU run targets ---
 
 # Default: e1000 (matches limine.conf's static 10.0.2.15/24).

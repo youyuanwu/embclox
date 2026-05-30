@@ -1,11 +1,18 @@
 # scripts/hyperv-boot-test.ps1
 #
-# Hyper-V Gen1 boot + VMBus + NetVSC TCP echo test for the Hyper-V
-# example kernel.
+# Hyper-V Gen1 boot + VMBus + NetVSC TCP echo test for an embclox
+# kernel ISO.
 #
 # Creates a Gen1 VM, attaches the ISO as a DVD, reads serial output
 # from COM1 named pipe, attaches the VM to the dedicated `embclox-test`
 # Internal vSwitch, and probes TCP echo on port 1234.
+#
+# Default target: build/kernel-hyperv.iso (the unified examples-kernel
+# binary baked with `cmdline: net=static,ip=192.168.234.50/24,gw=192.168.234.1`,
+# matching the dedicated `embclox-test` Internal vSwitch). Use -Iso to
+# point at the one-driver examples-hyperv reference instead:
+#   .\scripts\hyperv-boot-test.ps1 -Iso build\hyperv.iso
+# Both ISOs emit the same PHASE4B / VMBUS / NETVSC marker strings.
 #
 # Prerequisites:
 #   - Hyper-V enabled (Windows feature)
@@ -16,8 +23,10 @@
 #     unconnected, and TCP echo will be skipped.
 #   - Build the ISO first (from WSL or Linux):
 #       cmake -B build
-#       cmake --build build --target hyperv-image
-#     This produces build/hyperv.iso
+#       cmake --build build --target kernel-hyperv-image
+#     This produces build/kernel-hyperv.iso. For the one-driver
+#     reference use `--target hyperv-image` and pass `-Iso
+#     build/hyperv.iso`.
 #
 # Usage (from PowerShell or WSL):
 #   .\scripts\hyperv-boot-test.ps1
@@ -26,7 +35,7 @@
 #   .\scripts\hyperv-boot-test.ps1 -SwitchName 'Default Switch'  # not recommended
 #
 # From WSL:
-#   powershell.exe -ExecutionPolicy Bypass -File scripts/hyperv-boot-test.ps1 -Iso build/hyperv.iso
+#   powershell.exe -ExecutionPolicy Bypass -File scripts/hyperv-boot-test.ps1 -Iso build/kernel-hyperv.iso
 #
 # Why a dedicated Internal vSwitch instead of Default Switch:
 # Hyper-V's Default Switch (NAT/ICS) accumulates Permanent ARP entries
@@ -38,8 +47,8 @@
 # every time you re-run hyperv-setup-vswitch.ps1.
 
 param(
-    [string]$Iso = "build\hyperv.iso",
-    [string]$VMName = "embclox-hyperv-test",
+    [string]$Iso = "build\kernel-hyperv.iso",
+    [string]$VMName = "embclox-kernel-test",
     [int]$TimeoutSeconds = 90,
     [string]$SwitchName = "embclox-test",
     [string]$ExpectedHostIp = "192.168.234.1",
@@ -94,7 +103,7 @@ if ([System.IO.Path]::IsPathRooted($Iso)) {
 Write-Host "ISO: $isoPath"
 
 if (-not (Test-Path $isoPath)) {
-    throw "ISO not found: $isoPath. Build with: cmake --build build --target hyperv-image"
+    throw "ISO not found: $isoPath. Build with: cmake --build build --target kernel-hyperv-image"
 }
 
 # --- Pre-flight checks ---

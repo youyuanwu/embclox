@@ -18,7 +18,8 @@ bootloader); the per-example bootloader divergence is gone.
 | `memory` | Page-table mapper for MMIO ranges (`map_mmio`) |
 | `heap` | Global heap (`linked_list_allocator::LockedHeap`) |
 | `serial` | UART 16550 driver + `log` backend |
-| `pci` | Type-1 PCI config-space scanner |
+| `pci` | Type-1 PCI config-space scanner (`find_device`, `find_device_any`, `enumerate`) |
+| `vector_alloc` | `VectorAllocator` / `CpuId` / `InstalledIsr` — IDT vector pool for driver ISRs (used by `embclox-driver`) |
 | `cmdline` | Bootloader-agnostic `net=dhcp` / `net=static` parser |
 | `limine_boot` | Limine request statics (via macro) + `LimineBootInfo` collector |
 
@@ -78,6 +79,8 @@ before the embassy executor is up.
 - `examples-e1000` — Intel e1000 NIC on QEMU
 - `examples-tulip` — DEC Tulip NIC on QEMU + Hyper-V Gen1
 - `examples-hyperv` — NetVSC synthetic NIC on Hyper-V/Azure Gen1
+- `examples-kernel` — unified binary; picks whichever NIC is present
+  via the [`embclox-driver`](../embclox-driver/README.md) registry
 - `qemu-tests/unit` — host-side HAL/driver test harness
 
 All four boot via Limine (BIOS+UEFI ISO from `cmake --build build --target

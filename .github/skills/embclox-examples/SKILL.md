@@ -7,8 +7,8 @@ description: "How to develop bare-metal x86_64 Rust kernel examples in the embcl
 
 Use this skill when adding a new example kernel under `examples-<name>/`,
 modifying an existing one (`examples-e1000`, `examples-tulip`,
-`examples-hyperv`), wiring a new device driver into an example, or
-investigating why a CI/Hyper-V/Azure run misbehaves.
+`examples-hyperv`, `examples-kernel`), wiring a new device driver into
+an example, or investigating why a CI/Hyper-V/Azure run misbehaves.
 
 ## Repository orientation
 
@@ -18,13 +18,15 @@ embclox/
 │   ├── embclox-hal-x86/     # x86_64 HAL: APIC, IOAPIC, PIC, IDT, PIT,
 │   │                        #   memory mapper, heap, serial, time
 │   │                        #   driver, runtime (executor + APIC timer),
-│   │                        #   limine_boot (request macro + collect)
+│   │                        #   pci, vector_alloc, limine_boot
 │   ├── embclox-dma/         # DMA allocator trait + DmaRegion
 │   ├── embclox-{e1000,tulip,hyperv}/  # device drivers
+│   ├── embclox-driver/      # bus/driver/device + EmbcloxNic + DriverRegistry
 │   └── embclox-core/        # shared driver glue (e1000_embassy, etc.)
 ├── examples-e1000/          # Limine boot, e1000 NIC, QEMU/KVM
 ├── examples-tulip/          # Limine boot, Tulip NIC, QEMU SLIRP
 ├── examples-hyperv/         # Limine boot, NetVSC over VMBus, Hyper-V/Azure
+├── examples-kernel/         # Unified: registry picks NIC at boot
 ├── qemu-tests/unit/         # Limine-booted host-side test harness
 ├── tests/infra/             # bicep templates for Azure deployment
 ├── scripts/                 # qemu-test.sh, hyperv-*.ps1, mkvhd.sh
@@ -89,6 +91,29 @@ for the cleanest reference):
 — that defeats the waker pattern and pins the CPU at 100%. Always use
 `runtime::run_executor`.
 
+## Unified `examples-kernel` (single binary, any NIC)
+
+`examples-kernel` is the canonical reference going forward. It uses
+[`embclox-driver`](../../../crates/embclox-driver/README.md)'s
+`DriverRegistry` to runtime-detect e1000 / tulip / NetVSC and bring up
+whichever is present. See
+[docs/design/driver-model.md](../../../docs/design/driver-model.md).
+
+When adding a new NIC family:
+
+1. Add a `<name>Driver` marker in `crates/embclox-driver/src/drivers/`
+   implementing `PciDriver` or `VmBusDriver`, plus its private
+   `EmbcloxNic` wrapper + static ISR.
+2. Register it in `crates/embclox-driver/src/defaults.rs::register_default_drivers`.
+3. Pick a `priority()` (lower wins): NetVSC=10, e1000=20, tulip=30.
+4. Add a `kernel-echo-<name>` ctest lane in
+   [examples-kernel/CMakeLists.txt](../../../examples-kernel/CMakeLists.txt)
+   that boots `kernel.iso` against `-device <name>`.
+
+The per-NIC `examples-{e1000,tulip,hyperv}` crates remain as small,
+focused references for one-driver bring-up and as the regression
+target for that single driver's wiring.
+
 ## Network configuration
 
 Network mode is selected at boot via the kernel command line, parsed by
@@ -135,8 +160,11 @@ cmake --build build --target unit-test-image # -> build/unit-tests.iso
 cmake --build build --target tulip-image     # -> build/tulip.iso
 cmake --build build --target hyperv-image    # -> build/hyperv.iso (local)
 cmake --build build --target hyperv-vhd      # -> build/hyperv.vhd  (Azure)
+cmake --build build --target kernel-image    # -> build/kernel.iso (unified)
+cmake --build build --target kernel-vhd      # -> build/kernel.vhd  (Azure)
 
-# Run all CI tests (5 currently: e1000-echo, unit, tulip-{boot,echo}, hyperv-boot):
+# Run all CI tests (7 currently: e1000-echo, unit, tulip-{boot,echo},
+# hyperv-boot, kernel-echo-{e1000,tulip}):
 ctest --test-dir build --output-on-failure
 ```
 

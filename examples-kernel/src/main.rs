@@ -80,6 +80,10 @@ unsafe extern "C" fn kmain() -> ! {
         },
     );
     info!("embclox kernel example booting (Limine)");
+    // Marker scanned by scripts/hyperv-boot-test.ps1 to confirm the
+    // kernel reached `kmain`. Same string as examples-hyperv so the
+    // existing PS test works against either ISO unchanged.
+    info!("HYPERV BOOT PASSED");
 
     // --- Interrupt + APIC infrastructure -------------------------------
 
@@ -137,6 +141,8 @@ unsafe extern "C" fn kmain() -> ! {
                     vmbus.version(),
                     vmbus.offers().len()
                 );
+                // Marker for scripts/hyperv-boot-test.ps1.
+                info!("VMBUS INIT PASSED");
                 vmbus_holder = Some(vmbus);
             }
             Err(e) => warn!("VMBus init failed: {} (continuing without VMBus)", e),
@@ -185,6 +191,10 @@ unsafe extern "C" fn kmain() -> ! {
 
     for n in &nics {
         info!("nic: {} priority={}", n.name, n.priority);
+        // Marker for scripts/hyperv-boot-test.ps1.
+        if n.name == "netvsc" {
+            info!("NETVSC INIT PASSED");
+        }
     }
     if nics.len() == PROBE_BUDGET {
         warn!(
@@ -268,15 +278,18 @@ async fn echo_task(stack: &'static Stack<'static>) {
     // Wait for an IPv4 address (immediate for static, ~1-3s for DHCP).
     loop {
         if let Some(cfg) = stack.config_v4() {
-            info!("kernel-example: IPv4 {}", cfg.address);
+            // Marker for scripts/hyperv-boot-test.ps1 — same format as
+            // examples-hyperv so the existing PS test works unchanged.
+            info!("PHASE4B: IPv4 configured: {}", cfg.address);
             if let Some(gw) = cfg.gateway {
-                info!("kernel-example: gateway {}", gw);
+                info!("PHASE4B: gateway: {}", gw);
             }
             break;
         }
         embassy_time::Timer::after_millis(100).await;
     }
-    info!("kernel-example: TCP echo ready on port 1234");
+    // Marker for scripts/hyperv-boot-test.ps1.
+    info!("PHASE4B ECHO READY: TCP port 1234");
 
     let mut rx = [0u8; 1024];
     loop {

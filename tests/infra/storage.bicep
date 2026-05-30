@@ -12,7 +12,7 @@
 //   sa=$(az deployment group show -g embclox-storage -n storage \
 //         --query properties.outputs.storageAccount.value -o tsv)
 //   az storage blob upload --account-name $sa -c vhds \
-//     -f build/hyperv.vhd -n hyperv.vhd --type page --overwrite
+//     -f build/kernel.vhd -n kernel.vhd --type page --overwrite
 //
 // Then deploy the VM in its own RG (see vm.bicep).
 
@@ -40,8 +40,8 @@ resource vhdContainer 'Microsoft.Storage/storageAccounts/blobServices/containers
   name: 'vhds'
 }
 
-@description('Filename of the VHD (used in the example upload command).')
-param vhdName string = 'hyperv.vhd'
+@description('Filename of the VHD (used in the example upload command). Defaults to the unified examples-kernel artefact.')
+param vhdName string = 'kernel.vhd'
 
 output storageAccount string = saNameTrunc
 output blobEndpoint string = storageAccount.properties.primaryEndpoints.blob

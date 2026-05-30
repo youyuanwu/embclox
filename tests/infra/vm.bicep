@@ -8,7 +8,7 @@
 //   vmRg=embclox-vm
 //   sa=$(az deployment group show -g $storageRg -n storage \
 //         --query properties.outputs.storageAccount.value -o tsv)
-//   vhdUri="https://${sa}.blob.core.windows.net/vhds/hyperv.vhd"
+//   vhdUri="https://${sa}.blob.core.windows.net/vhds/kernel.vhd"
 //   az deployment group create -g $vmRg --template-file tests/infra/vm.bicep \
 //     --parameters vhdBlobUri=$vhdUri storageAccountName=$sa \
 //                  storageResourceGroup=$storageRg

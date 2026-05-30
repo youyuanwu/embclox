@@ -61,5 +61,7 @@ add_custom_target(images
         hyperv-image
         hyperv-vhd
         kernel-image
+        kernel-hyperv-image
+        kernel-vhd
     COMMENT "Building all bootable images (ISOs + VHDs)"
 )

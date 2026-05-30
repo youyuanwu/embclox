@@ -49,6 +49,10 @@ jobs:
         working-directory: examples-hyperv
         run: cargo clippy -- -D warnings
 
+      - name: Clippy kernel example
+        working-directory: examples-kernel
+        run: cargo clippy -- -D warnings
+
       - name: Install QEMU and OVMF
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 ovmf netcat-openbsd xorriso mtools dosfstools qemu-utils
 

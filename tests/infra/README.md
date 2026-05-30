@@ -20,14 +20,17 @@ imports stay fast and free.
 
 ## Which VHD?
 
-| VHD | Driver | Use on Azure? |
-|-----|--------|---------------|
-| `build/hyperv.vhd` | NetVSC (VMBus) | ✅ **yes** — production path |
+| VHD | Driver model | Use on Azure? |
+|-----|-------|---------------|
+| `build/kernel.vhd` | Unified registry (picks NetVSC at boot) | ✅ **yes** — production path |
+| `build/hyperv.vhd` | NetVSC (VMBus), one-driver reference | ✅ works — keep for minimal debugging |
 | `build/tulip.vhd` | DEC 21140 (PCI) | ❌ no — Azure Gen1 doesn't expose Tulip on PCI |
 
 Azure Gen1 VMs only expose chipset bridges + a Hyper-V synthetic VGA on
-PCI. Networking goes through VMBus NetVSC, so the hyperv example is the
-only one that actually does I/O on Azure.
+PCI. Networking goes through VMBus NetVSC, so any kernel that wants
+network on Azure must include the NetVSC driver. The unified
+`kernel.vhd` is the canonical choice; `hyperv.vhd` stays as a stripped-
+down one-driver reference for VMBus debugging.
 
 ## Prerequisites
 
@@ -35,7 +38,8 @@ only one that actually does I/O on Azure.
 - VHD built locally:
   ```sh
   cmake -B build
-  cmake --build build --target hyperv-vhd
+  cmake --build build --target kernel-vhd   # canonical (unified)
+  # or: cmake --build build --target hyperv-vhd   # one-driver reference
   ```
 
 ## Deploy
@@ -59,14 +63,14 @@ sa=$(az deployment group show -g $storageRg -n storage \
   --query properties.outputs.storageAccount.value -o tsv)
 
 az storage blob upload --account-name $sa -c vhds \
-  -f build/hyperv.vhd -n hyperv.vhd --type page --overwrite
+  -f build/kernel.vhd -n kernel.vhd --type page --overwrite
 ```
 
 ### 3. Deploy the VM (in its own RG)
 
 ```sh
 vmRg=embclox-vm
-vhdUri="https://${sa}.blob.core.windows.net/vhds/hyperv.vhd"
+vhdUri="https://${sa}.blob.core.windows.net/vhds/kernel.vhd"
 
 az group create --name $vmRg --location $location
 az deployment group create -g $vmRg \
@@ -83,7 +87,7 @@ az deployment group create -g $vmRg \
 ip=$(az deployment group show -g $vmRg -n vm \
   --query properties.outputs.publicIpAddress.value -o tsv)
 
-# Serial output (boot diagnostics) — look for "PHASE4B: DHCP assigned: ..."
+# Serial output (boot diagnostics) — look for "PHASE4B: IPv4 configured: ..."
 az vm boot-diagnostics get-boot-log -g $vmRg -n $vmRg
 
 # TCP echo
@@ -97,9 +101,9 @@ just works.
 
 ```sh
 # Rebuild and re-upload (storage RG only)
-cmake --build build --target hyperv-vhd
+cmake --build build --target kernel-vhd
 az storage blob upload --account-name $sa -c vhds \
-  -f build/hyperv.vhd -n hyperv.vhd --type page --overwrite
+  -f build/kernel.vhd -n kernel.vhd --type page --overwrite
 
 # Recreate the VM (VM RG only — storage stays untouched)
 az vm deallocate -g $vmRg -n $vmRg
@@ -126,7 +130,7 @@ az group create --name $vmRg --location $location
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
-| `vhdName` | `hyperv.vhd` | Filename surfaced in `uploadCommand` output. |
+| `vhdName` | `kernel.vhd` | Filename surfaced in `uploadCommand` output. |
 
 ### `vm.bicep`
 
