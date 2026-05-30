@@ -1,16 +1,16 @@
 {
     "rust-analyzer.check.extraArgs": [
         "--exclude",
-        "embclox-example",
-        "--exclude",
         "embclox-unit-tests",
         "--exclude",
-        "embclox-hyperv-example",
-        "--exclude",
-        "embclox-tulip-example"
+        "embclox-kernel-example"
     ],
     "chat.tools.terminal.autoApprove": {
         "cargo build": true,
-        "cargo test": true
+        "cargo test": true,
+        "cargo clippy": true,
+        "cargo fmt": true,
+        "cmake": true,
+        "ctest": true
     }
 }
