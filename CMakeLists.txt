@@ -21,6 +21,20 @@ set(LIMINE_UEFI_CD "${limine_SOURCE_DIR}/limine-uefi-cd.bin")
 set(LIMINE_BIOS_CD "${limine_SOURCE_DIR}/limine-bios-cd.bin")
 set(LIMINE_BIOS_SYS "${limine_SOURCE_DIR}/limine-bios.sys")
 
+# --- WSL detection ---
+# On WSL we can shell out to powershell.exe and drive Hyper-V via the
+# host's cmdlets. Used to conditionally register the kernel-hyperv-*
+# ctest lanes below.
+set(EMBCLOX_ON_WSL FALSE)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND EXISTS "/proc/version")
+    file(READ "/proc/version" _embclox_proc_version)
+    if(_embclox_proc_version MATCHES "[Mm]icrosoft|WSL")
+        set(EMBCLOX_ON_WSL TRUE)
+        message(STATUS "WSL detected: enabling kernel-hyperv-* ctest lanes")
+    endif()
+    unset(_embclox_proc_version)
+endif()
+
 # Lint all crates
 add_custom_target(check
     COMMAND cargo fmt --all

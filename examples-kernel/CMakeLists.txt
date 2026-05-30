@@ -206,3 +206,40 @@ add_test(NAME kernel-echo-tulip
         --qemu-args "-netdev user,id=net0,hostfwd=tcp::5555-:1234 -device tulip,netdev=net0 -m 256M"
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
+
+# --- Hyper-V ctest lanes (WSL only) ---
+# These drive scripts/hyperv-boot-test.ps1 via powershell.exe against
+# the host Hyper-V. They require:
+#   - the embclox-test Internal vSwitch (one-time setup via
+#     scripts/hyperv-setup-vswitch.ps1, run as Administrator)
+#   - the kernel-hyperv-image / kernel-hyperv-tulip-image targets to
+#     have been built first (ctest does not build images)
+#
+# Labelled `hyperv` so they can be selected with
+#   ctest -L hyperv --test-dir build
+# or skipped with
+#   ctest -LE hyperv --test-dir build
+if(EMBCLOX_ON_WSL)
+    add_test(NAME kernel-hyperv-netvsc
+        COMMAND powershell.exe -ExecutionPolicy Bypass
+            -File scripts/hyperv-boot-test.ps1
+            -Iso build/kernel-hyperv.iso
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    )
+    set_tests_properties(kernel-hyperv-netvsc PROPERTIES
+        LABELS "hyperv"
+        TIMEOUT 180
+    )
+
+    add_test(NAME kernel-hyperv-tulip
+        COMMAND powershell.exe -ExecutionPolicy Bypass
+            -File scripts/hyperv-boot-test.ps1
+            -Iso build/kernel-hyperv-tulip.iso
+            -AddLegacyNic
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    )
+    set_tests_properties(kernel-hyperv-tulip PROPERTIES
+        LABELS "hyperv"
+        TIMEOUT 180
+    )
+endif()
