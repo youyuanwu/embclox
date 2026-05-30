@@ -25,8 +25,6 @@ set(LIMINE_BIOS_SYS "${limine_SOURCE_DIR}/limine-bios.sys")
 add_custom_target(check
     COMMAND cargo fmt --all
     COMMAND cargo clippy -- -D warnings
-    COMMAND cargo clippy --manifest-path examples-e1000/Cargo.toml
-        --target ${TARGET} -- -D warnings
     COMMAND cargo clippy --manifest-path qemu-tests/unit/Cargo.toml
         --target ${TARGET} -- -D warnings
     COMMAND cargo clippy --manifest-path examples-kernel/Cargo.toml
@@ -34,9 +32,6 @@ add_custom_target(check
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Formatting and linting all crates"
 )
-
-# e1000 example
-add_subdirectory(examples-e1000)
 
 # Unified kernel example (Limine boot, ISO; PCI + VMBus via the driver registry)
 add_subdirectory(examples-kernel)
@@ -47,7 +42,6 @@ add_subdirectory(qemu-tests/unit)
 # Aggregate: build every bootable image (ISOs + VHDs)
 add_custom_target(images
     DEPENDS
-        e1000-image
         unit-test-image
         kernel-image
         kernel-hyperv-image

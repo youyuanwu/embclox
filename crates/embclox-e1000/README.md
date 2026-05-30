@@ -23,7 +23,9 @@ Caller is responsible for:
   reads ICR + wakes the embassy waker
 
 For the embassy-net `Driver` impl + canonical wiring, see
-`embclox-core::e1000_embassy` and `examples-e1000/src/main.rs`.
+`embclox-core::e1000_embassy` and the registry wrapper at
+`crates/embclox-driver/src/drivers/e1000.rs` (used by
+`examples-kernel`).
 
 ## Supported devices
 

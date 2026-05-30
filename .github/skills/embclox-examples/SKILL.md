@@ -6,7 +6,7 @@ description: "How to develop bare-metal x86_64 Rust kernel examples in the embcl
 # embclox Example Development
 
 Use this skill when adding a new example kernel under `examples-<name>/`,
-modifying an existing one (`examples-e1000`, `examples-kernel`),
+modifying the existing one (`examples-kernel`),
 wiring a new device driver into an example, or investigating why a
 CI/Hyper-V/Azure run misbehaves.
 
@@ -23,7 +23,6 @@ embclox/
 │   ├── embclox-{e1000,tulip,hyperv}/  # device drivers
 │   ├── embclox-driver/      # bus/driver/device + EmbcloxNic + DriverRegistry
 │   └── embclox-core/        # shared driver glue (e1000_embassy, etc.)
-├── examples-e1000/          # Limine boot, e1000 NIC, QEMU/KVM (one-driver ref)
 ├── examples-kernel/         # Unified: registry picks NIC at boot (QEMU + Hyper-V + Azure)
 ├── qemu-tests/unit/         # Limine-booted host-side test harness
 ├── tests/infra/             # bicep templates for Azure deployment
@@ -39,8 +38,11 @@ not enough.
 
 ## Standard example structure
 
-Every example follows the same skeleton (see `examples-e1000/src/main.rs`
-for the cleanest reference):
+Every example follows the same skeleton (see
+`examples-kernel/src/main.rs` for the canonical reference and the
+registry-aware per-NIC wrappers under
+`crates/embclox-driver/src/drivers/{e1000,tulip,netvsc}.rs` for the
+one-driver-at-a-time read):
 
 1. `#![no_std] #![no_main] #![feature(abi_x86_interrupt)]`
 2. **Limine boot setup** — call the HAL macro near the top of `main.rs`:
@@ -108,13 +110,11 @@ When adding a new NIC family:
    [examples-kernel/CMakeLists.txt](../../../examples-kernel/CMakeLists.txt)
    that boots `kernel.iso` against `-device <name>`.
 
-The per-NIC `examples-e1000` crate remains as a small, focused
-reference for one-driver bring-up and as the regression target for
-that single driver's wiring on QEMU. The tulip and NetVSC paths are
-exercised only through `examples-kernel` (the registry + the
-`embclox_driver::drivers::{tulip,netvsc}` wrappers); the standalone
-`examples-tulip` binary was retired in Phase 3d and
-`examples-hyperv` in Phase 3c.
+The per-NIC `examples-{e1000,tulip,hyperv}` crates have all been
+retired (Phases 3e / 3d / 3c). The standalone one-driver reads now
+live at `crates/embclox-driver/src/drivers/{e1000,tulip,netvsc}.rs`
+(~60 LoC each, just the registry wrapper); the per-NIC bring-up
+flow lives end-to-end in `examples-kernel/src/main.rs`.
 
 ## Network configuration
 
@@ -157,17 +157,16 @@ cd examples-kernel && cargo build --release
 # Image artefacts (CMake + xorriso/dd) — every example uses the same
 # Limine ISO pipeline:
 cmake -B build
-cmake --build build --target e1000-image          # -> build/e1000.iso
 cmake --build build --target unit-test-image      # -> build/unit-tests.iso
 cmake --build build --target kernel-image         # -> build/kernel.iso (QEMU/generic)
 cmake --build build --target kernel-hyperv-image  # -> build/kernel-hyperv.iso (local Hyper-V vSwitch)
+cmake --build build --target kernel-hyperv-tulip-image # -> build/kernel-hyperv-tulip.iso (legacy NIC + nic=tulip)
 cmake --build build --target kernel-vhd           # -> build/kernel.vhd  (Azure Gen1)
 
 # Or all of the above:
 cmake --build build --target images
 
-# Run all CI tests (4 currently: e1000-echo, unit,
-# kernel-echo-{e1000,tulip}):
+# Run all CI tests (3 currently: unit, kernel-echo-{e1000,tulip}):
 ctest --test-dir build --output-on-failure
 ```
 
@@ -185,7 +184,7 @@ Three layers, in increasing fidelity:
 - waits for a log line (`--log-match "NETVSC INIT PASSED"`), or
 - probes a TCP port (`--probe tcp:5555:hello-embclox`).
 
-When adding a new example, mirror the pattern in `examples-e1000/CMakeLists.txt`:
+When adding a new example, mirror the pattern in `examples-kernel/CMakeLists.txt`:
 
 ```cmake
 add_test(NAME <name>-boot

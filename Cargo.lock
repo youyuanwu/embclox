@@ -308,27 +308,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "embclox-example"
-version = "0.1.0"
-dependencies = [
- "embassy-executor",
- "embassy-futures",
- "embassy-net",
- "embassy-net-driver",
- "embassy-sync",
- "embassy-time",
- "embclox-core",
- "embclox-e1000",
- "embclox-hal-x86",
- "embedded-io-async",
- "limine",
- "log",
- "spin",
- "static_cell",
- "x86_64",
-]
-
-[[package]]
 name = "embclox-hal-x86"
 version = "0.1.0"
 dependencies = [

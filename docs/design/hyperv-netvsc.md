@@ -232,7 +232,7 @@ accepts both and they keep us on the well-trodden Linux path:
 ## LAPIC timer ISR — implemented (shared runtime)
 
 The executor poll loops in the original per-NIC examples
-(`examples-e1000`, the retired `examples-tulip`, the retired
+(the retired `examples-e1000`, `examples-tulip`, and
 `examples-hyperv`) and `examples-kernel` used to busy-spin and call
 `on_timer_tick()` + a "belt-and-braces" `WAKER.wake()` every
 iteration. That defeated the waker pattern (every netvsc/tulip-bound

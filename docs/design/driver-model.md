@@ -2,14 +2,14 @@
 
 ## Status: implemented (May 2026)
 
-Phases 1, 2, and most of Phase 3 of the migration path below are
-shipped in the tree: [`crates/embclox-driver`](../../crates/embclox-driver/)
-implements the registry; [`examples-kernel`](../../examples-kernel/)
-is the unified binary; `examples-hyperv` retired in Phase 3c and
-`examples-tulip` in Phase 3d. Only `examples-e1000` remains as a
-one-driver reference (trigger-driven retirement). Verified end-to-end
-on QEMU (e1000 + tulip ctest lanes) and on real Hyper-V Gen1 (NetVSC
-probe + RNDIS + TCP echo).
+All three phases of the migration path below are shipped:
+[`crates/embclox-driver`](../../crates/embclox-driver/) implements
+the registry; [`examples-kernel`](../../examples-kernel/) is the
+unified binary and the only kernel binary in the tree. The original
+per-NIC `examples-{hyperv,tulip,e1000}` crates are all retired (3c,
+3d, 3e). Verified end-to-end on QEMU (e1000 + tulip ctest lanes)
+and on real Hyper-V Gen1 (NetVSC probe + RNDIS + TCP echo, plus the
+legacy-NIC tulip path).
 
 Today each `examples-*` crate hard-codes one driver: PCI scan for
 `0x8086:0x100E`, or `0x1011:0x0009`, or `embclox_hyperv::init` for
@@ -727,9 +727,9 @@ the tree** as of the current commit:
 - [`embclox_hal_x86::init`](../../crates/embclox-hal-x86/src/lib.rs)
   is Limine-native (`init(boot_info: LimineBootInfo<'_>, config:
   Config) -> Peripherals`); no `bootloader_api` constructor exists.
-- [examples-e1000/CMakeLists.txt](../../examples-e1000/CMakeLists.txt)
-  and [examples-kernel/CMakeLists.txt](../../examples-kernel/CMakeLists.txt)
-  both build Limine BIOS+UEFI ISOs through the same pipeline.
+- [examples-kernel/CMakeLists.txt](../../examples-kernel/CMakeLists.txt)
+  builds Limine BIOS+UEFI ISOs (`kernel.iso`, `kernel-hyperv.iso`,
+  `kernel-hyperv-tulip.iso`) and a Gen1 VHD through the same pipeline.
 - The workspace has no remaining `bootloader_api` references.
 
 Why Limine is the standard:
@@ -880,7 +880,7 @@ driver count exceeds ~5.
 ### T-4: Bootloader — Limine (framework standard, migration complete)
 
 Limine is the embclox framework's standard bootloader. The HAL and
-all three `examples-*` crates already build through the Limine
+the unified `examples-kernel` crate both build through the Limine
 pipeline; see the "Bootloader" section above for the rationale and
 the small remaining doc-cleanup list. **This trade-off is recorded
 for history; it does not gate Phase 1.**
@@ -919,18 +919,17 @@ grow a `remove()` method, but nothing in current examples needs it.
   crate, not a rewrite.
 - The embassy-net `Driver` impls. They stay where they are.
 - Per-driver ISRs. They remain `static extern "x86-interrupt" fn`.
-- `examples-e1000` continues to exist as a small, single-driver
-  reference that newcomers can read in one sitting. (Uses Limine
-  — see "Bootloader".) `examples-tulip` retired in Phase 3d and
-  `examples-hyperv` in Phase 3c — their functionality is covered
-  by `examples-kernel` + the registry-aware wrappers in
-  `crates/embclox-driver/src/drivers/{tulip,netvsc}.rs`.
+- The per-NIC `examples-{e1000,tulip,hyperv}` crates are retired
+  (Phases 3e / 3d / 3c). Their functionality is covered by
+  `examples-kernel` + the registry-aware wrappers in
+  `crates/embclox-driver/src/drivers/{e1000,tulip,netvsc}.rs`,
+  which are now the one-driver-at-a-time references.
 
 ## Migration path
 
-Three phases. **Phases 1 and 2 are shipped**; Phase 3 is optional and
-open. Limine standardisation (formerly "Phase 0") was already in the
-tree before this work began — see "Bootloader".
+Three phases, **all shipped**. Limine standardisation (formerly
+"Phase 0") was already in the tree before this work began — see
+"Bootloader".
 
 ### Phase 1 — HAL prerequisites + driver-model crate — ✅ shipped
 
@@ -984,81 +983,56 @@ The Hyper-V `scripts/hyperv-boot-test.ps1` default `-Iso` and the
 artefacts; the per-NIC `examples-hyperv` paths were retired in
 Phase 3c — see below.
 
-### Phase 3 — Retire single-driver examples — partially shipped
+### Phase 3 — Retire single-driver examples — ✅ shipped
 
-The unified `examples-kernel` is the canonical reference going
-forward. `examples-tulip` and `examples-hyperv` are retired (3d, 3c);
-`examples-e1000` remains as a one-driver reference. The retired
-binaries' coverage is preserved: tulip via `kernel-echo-tulip` +
-`crates/embclox-driver/src/drivers/tulip.rs`; NetVSC via
-`scripts/hyperv-boot-test.ps1` against `kernel-hyperv.iso` +
-`crates/embclox-driver/src/drivers/netvsc.rs`.
+The unified `examples-kernel` is the only kernel binary in the
+tree. All three retired binaries' coverage is preserved:
+
+- **e1000** — `kernel-echo-e1000` ctest lane +
+  `crates/embclox-driver/src/drivers/e1000.rs`.
+- **tulip** — `kernel-echo-tulip` ctest lane (QEMU) and
+  `kernel-hyperv-tulip-image` + `scripts/hyperv-boot-test.ps1
+  -AddLegacyNic` (Hyper-V legacy NIC) +
+  `crates/embclox-driver/src/drivers/tulip.rs`.
+- **NetVSC** — `scripts/hyperv-boot-test.ps1` against
+  `kernel-hyperv.iso` + `crates/embclox-driver/src/drivers/netvsc.rs`.
 
 #### Progress
 
 | Substep | Status |
 |---------|--------|
 | 3a — extract unit-test pipeline | ✅ shipped |
-| 3b — drop `hyperv-boot` lane | ✅ shipped (dropped; `kernel-echo-{e1000,tulip}` is the superset) |
+| 3b — drop `hyperv-boot` lane | ✅ shipped (`kernel-echo-{e1000,tulip}` is the superset) |
 | 3c — retire `examples-hyperv` | ✅ shipped |
 | 3d — retire `examples-tulip` | ✅ shipped |
-| 3e — retire `examples-e1000` | open (trigger-driven) |
+| 3e — retire `examples-e1000` | ✅ shipped |
 
-#### When to execute 3e
-
-Retire only when either trigger fires:
-
-- **Drift signal.** `examples-e1000` fails to compile or boot
-  because somebody touched the HAL and didn't update it. That's
-  the maintenance-cost-exceeds-value point.
-- **Pedagogical value subsumed.** Readers stop reaching for
-  `examples-e1000/src/main.rs` because the per-driver wrapper at
-  `crates/embclox-driver/src/drivers/e1000.rs` (~60 lines) is now
-  the obvious one-driver read.
-
-Until one of those happens, **leave it in place** — it costs
-~250 LoC + 2 CMake targets + 1 ctest lane + 1 CI clippy lane,
-which is small relative to the per-driver regression coverage on
-QEMU (`e1000-echo` exercises the one-driver boot wiring without
-the registry in the picture).
-
-#### Remaining inventory
-
-| Crate | LoC main.rs | CMake targets | ctest lanes | Owns also |
-|-------|------------:|---------------|-------------|-----------|
-| `examples-e1000` | ~250 | `e1000-{build,image}`, `qemu-e1000` | `e1000-echo` | — |
-
-#### Remaining substep
-
-**3e. Retire `examples-e1000`.** Independently shippable now that
-3a moved the unit-test pipeline out. Remove from `Cargo.toml`,
-root `CMakeLists.txt` (subdir, `images` aggregate, `check` clippy
-lane), `.github/workflows/ci.yml` (clippy lane). `crates/embclox-e1000`
-stays — it's the actual driver, consumed by
-`crates/embclox-driver/src/drivers/e1000.rs`.
-
-#### What we keep regardless
+#### What we keep
 
 - `crates/embclox-{e1000,tulip,hyperv}` — the device-driver
-  implementations; only the binary wrappers retire.
+  implementations; only the binary wrappers retired.
 - `crates/embclox-driver/src/drivers/{e1000,tulip,netvsc}.rs` —
   the registry-aware per-NIC wrappers; these are now the canonical
   one-driver read.
-- `scripts/hyperv-boot-test.ps1` and the `tests/infra/` Azure
-  pipeline — already point at the unified `kernel.*` artefacts.
+- `scripts/hyperv-boot-test.ps1` (with the `-AddLegacyNic` switch
+  for the tulip path) and the `tests/infra/` Azure pipeline —
+  all point at the unified `kernel.*` artefacts.
 
 #### Risks (recorded from the original plan)
 
-1. **Lost per-driver test isolation.** Realised for the NetVSC
-   path post-3c and the tulip path post-3d: the only way to test
-   either in isolation is to manually disable the other drivers'
+1. **Lost per-driver test isolation.** Realised for all three
+   retired binaries: the only way to test e1000, tulip, or NetVSC
+   in isolation is to manually disable the other drivers'
    registration in the kernel binary. If a regression demands it,
    add a "minimal" kernel-test crate that registers only one
-   driver. Same will apply to e1000 post-3e.
+   driver, or extend the `nic=` cmdline filter
+   (`crates/embclox-hal-x86/src/cmdline.rs::parse_nic_filter` +
+   `crates/embclox-driver/src/defaults.rs::register_named_driver`)
+   to additionally suppress the unwanted drivers' registrations.
 2. **Pedagogical value.** A ~250-line one-driver `main.rs` is
    easier to read in one sitting than `examples-kernel/src/main.rs`.
    Mitigation: `crates/embclox-driver/src/drivers/<nic>.rs` (~60
-   lines, just the driver wrapper) becomes the one-driver read.
+   lines, just the driver wrapper) is now the one-driver read.
 3. **Real-Hyper-V coverage.** Dropped from "explicit hyperv-only
    binary built every commit" to "Hyper-V tested only via the
    unified kernel" in 3c. No regression seen since.

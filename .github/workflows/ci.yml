@@ -33,10 +33,6 @@ jobs:
       - name: Clippy workspace
         run: cargo clippy -- -D warnings
 
-      - name: Clippy e1000 example
-        working-directory: examples-e1000
-        run: cargo clippy -- -D warnings
-
       - name: Clippy unit tests
         working-directory: qemu-tests/unit
         run: cargo clippy -- -D warnings
