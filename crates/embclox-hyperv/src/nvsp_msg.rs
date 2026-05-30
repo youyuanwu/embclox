@@ -50,6 +50,8 @@ pub enum NvspResponse<'a> {
     SendBufComplete { status: u32, section_size: u32 },
     /// Response to NVSP_MSG1_TYPE_SEND_RNDIS_PKT.
     RndisPktComplete { status: u32 },
+    /// Response to NVSP_MSG5_TYPE_SUBCHANNEL.
+    SubChannelComplete { status: u32, num_subchannels: u32 },
     /// Unrecognized message type.
     Unknown(u32),
 }
@@ -105,6 +107,13 @@ pub fn parse_nvsp_response(data: &[u8]) -> Option<NvspResponse<'_>> {
         x if x == NvspMessageType::SendRndisPktComplete.as_u32() => {
             let c = unsafe { cast_ref::<ffi::nvsp_1_message_send_rndis_packet_complete>(body)? };
             Some(NvspResponse::RndisPktComplete { status: c.Status })
+        }
+        x if x == NvspMessageType::SubChannel.as_u32() => {
+            let c = unsafe { cast_ref::<ffi::nvsp_5_message_subchannel_complete>(body)? };
+            Some(NvspResponse::SubChannelComplete {
+                status: c.Status,
+                num_subchannels: c.NumSubChannels,
+            })
         }
         _ => Some(NvspResponse::Unknown(msg_type)),
     }
@@ -188,6 +197,25 @@ pub fn build_nvsp_send_ndis_config(mtu: u32, capabilities: u64) -> ffi::nvsp_mes
         let v2 = &mut msg.Messages.Version2Messages;
         v2.SendNdisConfig.MTU = mtu;
         v2.SendNdisConfig.Capabilities.__bindgen_anon_1.AsUINT64 = capabilities;
+    }
+    msg
+}
+
+/// Build an NVSP_MSG5_TYPE_SUBCHANNEL request.
+///
+/// We always request `NumSubChannels=0` with `Operation=NvspSubchannelAllocate`,
+/// which explicitly tells the host this guest is single-queue. Linux netvsc
+/// only sends this when `num_chn > 1`, but post-2026-05 Hyper-V hosts seem
+/// to stall the RX path entirely until they hear something from us about
+/// queue configuration. Sending an explicit single-queue request unblocks
+/// data delivery.
+pub fn build_nvsp_subchannel_request(num_subchannels: u32) -> ffi::nvsp_message {
+    let mut msg = ffi::nvsp_message::default();
+    msg.Header.MessageType = NvspMessageType::SubChannel.as_u32();
+    unsafe {
+        let v5 = &mut msg.Messages.Version5Messages;
+        v5.SubChannelRequest.Operation = ffi::NVSP_SUBCHANNEL_ALLOCATE;
+        v5.SubChannelRequest.NumSubChannels = num_subchannels;
     }
     msg
 }

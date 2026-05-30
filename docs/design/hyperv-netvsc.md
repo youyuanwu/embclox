@@ -13,7 +13,7 @@ VMBus channel: `F8615163-DF3E-46C5-913F-F2D2F965ED0E`
 | NVSP — version negotiation, recv/send buffer GPADLs | `crates/embclox-hyperv/src/netvsc.rs` | NVSP v6.1 negotiated on local Hyper-V Gen1 + Azure Gen1 |
 | RNDIS — init, MAC/MTU query, packet filter | `crates/embclox-hyperv/src/{nvsp_msg.rs,nvsp_types.rs}` | RNDIS v1.0, MAC/MTU read back on both |
 | RNDIS_PACKET_MSG TX/RX | `netvsc.rs::transmit_with` / `recv_with` | Gratuitous ARP + DHCP DISCOVER → reply received |
-| SynIC SINT2 → AtomicWaker | `examples-hyperv/src/main.rs::vmbus_isr` + `netvsc::NETVSC_WAKER` | IRQ count > 0 in test logs |
+| SynIC SINT2 → AtomicWaker, with SIEFP event-flag clear | `examples-hyperv/src/main.rs::vmbus_isr` + `netvsc::NETVSC_WAKER` | TCP echo on local Hyper-V + Azure (see [SIEFP event-flag clearing](#siefp-event-flag-clearing--required-for-host→guest-rx)) |
 | `embassy_net_driver::Driver` impl | `crates/embclox-hyperv/src/netvsc_embassy.rs` | TCP echo @ port 1234 verified locally + on Azure |
 | Cmdline-driven DHCP/static selection | `embclox_hal_x86::cmdline` + `examples-hyperv/limine.conf` | Both modes parse correctly |
 | Azure Gen1 deployment | `tests/infra/{storage,vm}.bicep` + `cmake --build build --target hyperv-vhd` | TCP echo from public Internet to bare-metal kernel: `echo X \| nc <public-ip> 1234` returns `X` |
@@ -113,8 +113,13 @@ and TCP echo all work today on local Hyper-V, QEMU, and Azure.
   cycles polling SIMP slots that the SINT2 ISR already woke us about.
   Design: [`docs/design/async-boot-init.md`](./async-boot-init.md).
 
-- **NetVSC subchannels.** Linux uses `nvsp_5_send_indirect_table` to
-  spread RX/TX across multiple channels for higher throughput. We use
+- **NetVSC subchannels (multi-queue).** On NVSPv5+ we already send
+  an explicit `NVSP_MSG5_TYPE_SUBCHANNEL` request with
+  `NumSubChannels=0` (see [`netvsc::nvsp_request_single_queue`](../../crates/embclox-hyperv/src/netvsc.rs))
+  so the host knows we're single-queue. Going multi-queue would mean
+  honouring the resulting indirection table and opening additional
+  channels for parallel RX/TX. Linux uses `nvsp_5_send_indirect_table`
+  to spread across multiple channels for higher throughput. We use
   one queue and it works for TCP echo. Reference: Linux
   `drivers/net/hyperv/netvsc.c::netvsc_init_buf` and
   `rndis_filter.c::netvsc_set_queues`.
@@ -138,6 +143,89 @@ and TCP echo all work today on local Hyper-V, QEMU, and Azure.
 - **Azure Gen2 / accelerated networking (SR-IOV).** Different code
   path entirely (PCI passthrough of a Mellanox/Microsoft NIC).
   Major new scope, not a NetVSC concern.
+
+## SIEFP event-flag clearing — required for host→guest RX
+
+After VMBus init, the host signals incoming packets on each opened
+channel by **setting** a bit in the SynIC Event Flags Page (SIEFP) and
+then raising SINT2. Modern Hyper-V uses edge-triggered semantics:
+if the guest leaves the bit set after handling, the host **stops
+re-raising SINT2 for that channel**. Init itself works without
+clearing because init traffic uses the SIMP message slot, which we
+already EOM via `synic::SynIC::ack_message`. The post-init data
+path uses SIEFP, so the ISR must clear it.
+
+### Layout
+
+- SIEFP is a 4 KiB DMA page mapped via the `SIEFP` MSR
+  (`0x4000_0082`), allocated and owned by
+  [`embclox_hyperv::synic::SynIC`](../../crates/embclox-hyperv/src/synic.rs).
+- The page holds 16 contiguous 256-byte slots, indexed by SINT
+  number. VMBus uses SINT2, starting at byte offset `2 * 256 = 512`.
+- Each slot holds 2048 bits (32 × `u64` words). The host sets bit
+  `child_relid` when it signals our channel `relid` (e.g. the NetVSC
+  channel typically lands at `relid=14`, so bit 14 of word 0 is set
+  on every NetVSC RX/TX-completion signal).
+
+### Implementation
+
+The SIEFP page address is published to the example's ISR via:
+
+1. [`SynIC::siefp_vaddr()`](../../crates/embclox-hyperv/src/synic.rs)
+   returns the kernel virtual address of the page.
+2. [`VmBus::siefp_vaddr()`](../../crates/embclox-hyperv/src/lib.rs)
+   re-exports it through the public type.
+3. After `embclox_hyperv::init` succeeds, the example stores it in
+   a `static SIEFP_VADDR: AtomicUsize` so the SINT2 ISR can read it
+   without a context.
+
+`vmbus_isr` in
+[`examples-hyperv/src/main.rs`](../../examples-hyperv/src/main.rs)
+walks the 32 `u64` words of the SINT2 slot on every SINT2, zeroing
+any non-zero word with a volatile read/write pair, then wakes
+`NETVSC_WAKER`. Single-CPU + interrupt context means a non-atomic
+read-then-write is race-free (the host only sets bits; it doesn't
+clear bits we set).
+
+### Symptom if missing
+
+Init completes (uses SIMP, which is correctly EOM-acked). The first
+post-init host→guest signal arrives, but no further SINT2 fires.
+Embassy-net's polling-via-APIC-timer fallback still drains the ring
+occasionally (one packet every 1 ms tick is enough for slow
+broadcasts like DHCP OFFER/ACK), so DHCP can complete and look like
+it works — but unicast TCP traffic from the host times out because
+the host never signals after the first packet. The
+[`scripts/hyperv-boot-test.ps1`](../../scripts/hyperv-boot-test.ps1)
+test reports `TCP echo @ port 1234: FAILED` in that state.
+
+### Why Linux works
+
+Linux's `vmbus_isr` in `drivers/hv/vmbus_drv.c` does the same scan,
+calling `sync_test_and_clear_bit` on each set bit. Linux additionally
+uses the per-channel monitor page mechanism for high-rate channels;
+NetVSC channel 14 reports `monitor_allocated=true, monitor_id=0`
+from the host, but the plain SIEFP path is sufficient for our
+single-queue use.
+
+### Related wire-format conformance
+
+Two other Linux-conformance items were tightened alongside the SIEFP
+fix. Neither was the root cause on its own, but the host visibly
+accepts both and they keep us on the well-trodden Linux path:
+
+- **Guest OS ID format.** `msr::set_guest_os_id` writes the Linux
+  layout (`HV_LINUX_VENDOR_ID = 0x8100` in bits 63:48,
+  `LINUX_VERSION_CODE`-style major.minor.patch in bits 47:16, build
+  in bits 15:0). The previous "open-source vendor 1, build 1"
+  encoding was accepted by older hosts but Linux's format is what
+  modern Hyper-V code paths special-case.
+
+- **Single-queue acknowledgement.** On NVSPv5+ we send an explicit
+  `NVSP_MSG5_TYPE_SUBCHANNEL` with `NumSubChannels=0` after the
+  RNDIS packet filter is set. Linux only sends this when multi-queue
+  is requested; we send it unconditionally so the host has an
+  explicit acknowledgement of our queue count.
 
 ## LAPIC timer ISR — implemented (shared runtime)
 

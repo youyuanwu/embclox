@@ -126,6 +126,14 @@ impl VmBus {
     ) -> Result<Channel, HvError> {
         channel::open_channel(offer, ring_size, dma, memory, &self.hcall, &self.synic)
     }
+
+    /// Virtual address of the SIEFP page (SynIC Event Flags).
+    ///
+    /// Exposed so the example's SINT2 ISR can scan and clear per-channel
+    /// event flags. See [`synic::SynIC::siefp_vaddr`] for layout.
+    pub fn siefp_vaddr(&self) -> usize {
+        self.synic.siefp_vaddr()
+    }
 }
 
 /// Initialize VMBus on Hyper-V.

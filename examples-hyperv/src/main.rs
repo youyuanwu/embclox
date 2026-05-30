@@ -4,7 +4,7 @@
 
 extern crate alloc;
 
-use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 use embassy_net::{Stack, StackResources};
 use embclox_dma::{DmaAllocator, DmaRegion};
 use embclox_hyperv::netvsc_embassy::NetvscEmbassy;
@@ -70,16 +70,50 @@ impl DmaAllocator for LimineDmaAllocator {
     }
 }
 
-/// Counter incremented every time the SynIC SINT2 ISR fires. Useful for
-/// verifying that interrupts are actually being delivered.
-static VMBUS_IRQ_COUNT: AtomicU32 = AtomicU32::new(0);
+/// Virtual address of the SIEFP page (SynIC Event Flags Page), set after
+/// VMBus init via [`embclox_hyperv::VmBus::siefp_vaddr`]. The ISR scans
+/// the SINT2 event-flag slot and clears each set bit so the host
+/// continues to raise SINT2 for that channel.
+///
+/// Stays 0 until VMBus init completes; ISR no-ops on the flag scan
+/// while it's 0. Only ever written once, before the IDT entry that
+/// vectors to `vmbus_isr` is installed-and-armed for data delivery.
+static SIEFP_VADDR: AtomicUsize = AtomicUsize::new(0);
 
 /// SynIC SINT2 → VMBus IDT vector handler.
 ///
-/// We only wake the netvsc waker — the SINT MSR is configured with auto-EOI
-/// (bit 17), so no explicit LAPIC EOI write is required.
+/// Scans the SIEFP SINT2 event-flag slot and clears each set bit
+/// (= child_relid the host signaled), then wakes the NetVSC waker.
+/// The SINT MSR is configured with auto-EOI (bit 17), so no explicit
+/// LAPIC EOI write is required.
+///
+/// Clearing the SIEFP bits is mandatory: modern Hyper-V uses edge-
+/// triggered semantics and will stop re-raising SINT2 for a channel
+/// whose event-flag bit is still set from the previous signal.
 extern "x86-interrupt" fn vmbus_isr(_frame: x86_64::structures::idt::InterruptStackFrame) {
-    VMBUS_IRQ_COUNT.fetch_add(1, Ordering::Relaxed);
+    // Clear set event-flag bits in our SINT2 slot. Layout: 16 contiguous
+    // 256-byte slots indexed by SINT; SINT2 starts at byte offset 512.
+    // Each slot holds 2048 bits (32 × u64 words); bit `relid` is set by
+    // the host when it signals our channel `relid`. If we leave the bit
+    // set, modern Hyper-V stops re-raising SINT2 for that channel.
+    let siefp = SIEFP_VADDR.load(Ordering::Relaxed);
+    if siefp != 0 {
+        let sint2_slot = (siefp + (embclox_hyperv::msr::VMBUS_SINT as usize) * 256) as *mut u64;
+        for i in 0..32usize {
+            // SAFETY: SIEFP is a 4 KiB DMA page we own; the 32 u64 words
+            // for SINT2's 256-byte slot are within bounds. Volatile to
+            // observe host writes; atomic swap would be ideal but
+            // single-CPU + interrupt-context makes a read+write safe.
+            unsafe {
+                let word_ptr = sint2_slot.add(i);
+                let word = core::ptr::read_volatile(word_ptr);
+                if word != 0 {
+                    core::ptr::write_volatile(word_ptr, 0);
+                }
+            }
+        }
+    }
+
     embclox_hyperv::netvsc::NETVSC_WAKER.wake();
 }
 
@@ -173,6 +207,9 @@ unsafe extern "C" fn kmain() -> ! {
 
             match embclox_hyperv::init(&dma, &mut p.memory) {
                 Ok(mut vmbus) => {
+                    // Publish the SIEFP page address to the ISR so it can
+                    // clear per-channel event flags after each SINT2.
+                    SIEFP_VADDR.store(vmbus.siefp_vaddr(), Ordering::Release);
                     info!(
                         "VMBus initialized: version={:#x}, {} channel offers",
                         vmbus.version(),

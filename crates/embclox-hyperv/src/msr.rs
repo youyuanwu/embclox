@@ -69,15 +69,21 @@ pub unsafe fn wrmsr(reg: u32, value: u64) {
 /// Must be called before enabling the hypercall page. A non-zero
 /// Guest OS ID is required by the hypervisor.
 ///
+/// Format (matches Linux `generate_guest_id` in
+/// `include/asm-generic/mshyperv.h`):
+///   bits 63..48: HV_LINUX_VENDOR_ID = 0x8100
+///   bits 47..16: kernel version (mimics LINUX_VERSION_CODE for 6.5.0)
+///   bits 15..0:  build number (we use 1)
+///
 /// # Safety
 /// Must run with CPL=0 (kernel mode). The hypervisor uses this value to
 /// decide which interface to expose; setting it after other Hyper-V MSRs
 /// have been initialised may invalidate them.
 pub unsafe fn set_guest_os_id() {
-    // Bit 63: open source OS
-    // Bits 55:48: vendor = 0x01
-    // Bits 15:0: build = 1
-    let guest_id: u64 = 0x8100_0000_0001_0001;
+    // 0x8100 = HV_LINUX_VENDOR_ID (Linux's value).
+    // 0x00060500 = LINUX_VERSION_CODE for 6.5.0 ((6<<16)|(5<<8)|0).
+    // 0x0001 = build number.
+    let guest_id: u64 = (0x8100u64 << 48) | (0x0006_0500u64 << 16) | 0x0001;
     wrmsr(GUEST_OS_ID, guest_id);
-    log::info!("Guest OS ID set to {:#x}", guest_id);
+    log::info!("Guest OS ID set to {:#x} (Linux-style)", guest_id);
 }

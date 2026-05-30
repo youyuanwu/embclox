@@ -10,8 +10,9 @@ use crate::guid;
 use crate::nvsp_msg::{
     build_nvsp_init, build_nvsp_send_ndis_config, build_nvsp_send_ndis_version,
     build_nvsp_send_recv_buf, build_nvsp_send_rndis_pkt, build_nvsp_send_send_buf,
-    build_rndis_init, build_rndis_query, build_rndis_set, nvsp_message_padded, parse_nvsp_response,
-    parse_rndis_response, rndis_message_as_bytes, NvspResponse, RndisResponse, RNDIS_HEADER_SIZE,
+    build_nvsp_subchannel_request, build_rndis_init, build_rndis_query, build_rndis_set,
+    nvsp_message_padded, parse_nvsp_response, parse_rndis_response, rndis_message_as_bytes,
+    NvspResponse, RndisResponse, RNDIS_HEADER_SIZE,
 };
 use crate::nvsp_types::{
     NdisOid, NdisPacketFilter, NvspMessageType, NvspVersion, RndisMessageType, VmbusPacketType,
@@ -276,6 +277,15 @@ impl NetvscDevice {
         dev.rndis_query_mac()?;
         dev.rndis_query_mtu()?;
         dev.rndis_set_packet_filter()?;
+
+        // NVSPv5+: explicitly negotiate single-queue mode.
+        // Without this, post-2026-05 Hyper-V hosts appear to stall the
+        // RX path entirely after RNDIS init. Linux netvsc only sends
+        // this when num_chn > 1, but the host still benefits from the
+        // explicit single-queue acknowledgement.
+        if dev.nvsp_version >= NvspVersion::V5.as_u32() {
+            dev.nvsp_request_single_queue()?;
+        }
 
         info!(
             "NetVSC: ready, MAC={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, MTU={}",
@@ -706,6 +716,42 @@ impl NetvscDevice {
 
         info!("NetVSC: packet filter set (directed+multicast+broadcast)");
         Ok(())
+    }
+
+    /// Send NVSP_MSG5_TYPE_SUBCHANNEL with `NumSubChannels = 0` to tell
+    /// the host this guest is single-queue, then wait for the
+    /// SubChannelComplete acknowledgement.
+    ///
+    /// Linux only sends this when `num_chn > 1`. We send it
+    /// unconditionally on NVSPv5+: post-2026-05 Hyper-V hosts appear to
+    /// withhold all subsequent RX traffic until they receive this
+    /// message, even from single-queue guests.
+    fn nvsp_request_single_queue(&mut self) -> Result<(), HvError> {
+        let req = build_nvsp_subchannel_request(0);
+        self.channel.send(&nvsp_message_padded(&req), 0)?;
+
+        let mut resp = [0u8; 256];
+        let (_desc, resp_len) = self
+            .channel
+            .recv_with_timeout(&mut resp, Duration::from_secs(2))?;
+
+        match parse_nvsp_response(&resp[..resp_len]) {
+            Some(NvspResponse::SubChannelComplete {
+                status,
+                num_subchannels,
+            }) => {
+                info!(
+                    "NetVSC: subchannel request complete (status={:#x}, num_subchannels={})",
+                    status, num_subchannels
+                );
+                Ok(())
+            }
+            other => {
+                warn!("NetVSC: expected SubChannelComplete, got {:?}", other);
+                // Don't fail boot — log and continue.
+                Ok(())
+            }
+        }
     }
 
     // ── Embassy-shaped data path (Phase 4a) ─────────────────────────

@@ -144,6 +144,12 @@ pub type nvsp_1_message_send_rndis_packet = NVSP_1_MESSAGE_SEND_RNDIS_PACKET;
 pub type nvsp_1_message_send_rndis_packet_complete = NVSP_1_MESSAGE_SEND_RNDIS_PACKET_COMPLETE;
 pub type nvsp_2_send_ndis_config = NVSP_2_MESSAGE_SEND_NDIS_CONFIG;
 pub type nvsp_2_vsc_capability = NVSP_2_NETVSC_CAPABILITIES;
+pub type nvsp_5_message_subchannel_request = NVSP_5_MESSAGE_SUBCHANNEL_REQUEST;
+pub type nvsp_5_message_subchannel_complete = NVSP_5_MESSAGE_SUBCHANNEL_COMPLETE;
+
+/// NVSP_SUBCHANNEL_OPERATION values (from nvspprotocol.h).
+pub const NVSP_SUBCHANNEL_NONE: u32 = 0;
+pub const NVSP_SUBCHANNEL_ALLOCATE: u32 = 1;
 
 // RNDIS types
 pub type rndis_message = RNDIS_MESSAGE;

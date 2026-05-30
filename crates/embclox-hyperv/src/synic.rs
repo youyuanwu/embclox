@@ -28,7 +28,7 @@ const _: () = assert!(core::mem::size_of::<HvMessage>() == 256);
 /// SynIC state: owns the SIMP and SIEFP pages.
 pub struct SynIC {
     simp: DmaRegion,
-    _siefp: DmaRegion,
+    siefp: DmaRegion,
 }
 
 impl SynIC {
@@ -61,10 +61,19 @@ impl SynIC {
             msr::VMBUS_VECTOR
         );
 
-        Self {
-            simp,
-            _siefp: siefp,
-        }
+        Self { simp, siefp }
+    }
+
+    /// Virtual address of the SIEFP (SynIC Event Flags Page).
+    ///
+    /// Layout: 16 contiguous 256-byte event-flag slots, indexed by SINT.
+    /// VMBus uses SINT2 — the slot at byte offset `2 * 256 = 512`. Each
+    /// slot is 2048 bits; bit `child_relid` is set by the host on
+    /// HvSignalEvent for that channel. The guest must `sync_clear_bit`
+    /// each set bit after handling, otherwise the host stops raising
+    /// SINT2 for that channel.
+    pub fn siefp_vaddr(&self) -> usize {
+        self.siefp.vaddr
     }
 
     /// Poll the SIMP for a message on the VMBus SINT slot.

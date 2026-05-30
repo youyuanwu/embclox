@@ -169,7 +169,7 @@ add_test(NAME <name>-boot
 
 ```powershell
 # One-time, as Administrator (creates embclox-test Internal vSwitch on 192.168.234.0/24):
-.\scripts\hyperv-setup-vswitch.ps1
+powershell.exe -ExecutionPolicy Bypass -File scripts/hyperv-setup-vswitch.ps1
 
 # Per-test (from WSL or PowerShell):
 powershell.exe -ExecutionPolicy Bypass -File scripts/hyperv-boot-test.ps1 \
