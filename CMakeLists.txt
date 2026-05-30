@@ -51,6 +51,7 @@ add_custom_target(images
         unit-test-image
         kernel-image
         kernel-hyperv-image
+        kernel-hyperv-tulip-image
         kernel-vhd
     COMMENT "Building all bootable images (ISOs + VHDs)"
 )

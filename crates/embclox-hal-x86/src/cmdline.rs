@@ -8,6 +8,8 @@
 //! - `net=static` → [`NetMode::Static`] using `default_static`
 //! - `ip=A.B.C.D/N` → override static IPv4 + prefix
 //! - `gw=A.B.C.D` → override static gateway
+//! - `nic=<name>` → restrict the driver registry to a single driver
+//!   `name()` (see [`parse_nic_filter`])
 //!
 //! Unknown tokens are ignored. An empty cmdline parses as
 //! `NetMode::Static` with the caller-provided defaults.
@@ -86,6 +88,24 @@ pub fn parse_ipv4_cidr(s: &str) -> Option<([u8; 4], u8)> {
     Some((ip, prefix))
 }
 
+/// Parse the `nic=<name>` token from a whitespace-separated cmdline.
+///
+/// Returns `Some(name)` when present, `None` otherwise. The kernel uses
+/// this to filter the driver registry to a single driver (matching
+/// `PciDriver::name()` / `VmBusDriver::name()`) so an operator can
+/// force, e.g., the tulip path on a Hyper-V VM that also has VMBus.
+///
+/// The returned slice borrows from `cmdline`; bind it to a variable
+/// with a lifetime that outlives the registry-probe call. Comparison
+/// is byte-for-byte and case-sensitive — driver `name()` strings are
+/// stable identifiers, not user-facing.
+pub fn parse_nic_filter(cmdline: &str) -> Option<&str> {
+    cmdline
+        .split_ascii_whitespace()
+        .find_map(|tok| tok.strip_prefix("nic="))
+        .filter(|s| !s.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +169,25 @@ mod tests {
     #[test]
     fn out_of_range_prefix_falls_back() {
         assert_eq!(parse_ipv4_cidr("10.0.0.1/33"), None);
+    }
+
+    #[test]
+    fn nic_filter_absent_returns_none() {
+        assert_eq!(parse_nic_filter(""), None);
+        assert_eq!(parse_nic_filter("net=dhcp"), None);
+    }
+
+    #[test]
+    fn nic_filter_basic() {
+        assert_eq!(parse_nic_filter("nic=tulip"), Some("tulip"));
+        assert_eq!(
+            parse_nic_filter("net=static ip=10.0.0.5/24 nic=e1000"),
+            Some("e1000")
+        );
+    }
+
+    #[test]
+    fn nic_filter_empty_value_treated_as_absent() {
+        assert_eq!(parse_nic_filter("nic="), None);
     }
 }

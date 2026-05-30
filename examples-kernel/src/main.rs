@@ -165,7 +165,18 @@ unsafe extern "C" fn kmain() -> ! {
     );
 
     let mut registry = DriverRegistry::new();
-    register_default_drivers(&mut registry);
+    // `nic=<name>` cmdline filter: register only the matching driver.
+    // Useful for forcing the tulip path on a Hyper-V VM that also has
+    // VMBus (NetVSC would otherwise always win on priority). When
+    // absent (the common case) we register the full default set.
+    let nic_filter = embclox_hal_x86::cmdline::parse_nic_filter(boot_info.cmdline);
+    match nic_filter {
+        Some(name) => {
+            info!("nic filter: registering only '{}'", name);
+            embclox_driver::register_named_driver(&mut registry, name);
+        }
+        None => register_default_drivers(&mut registry),
+    }
 
     let nics: alloc::vec::Vec<ProbedNic> = {
         let mut ctx = ProbeCtx {
@@ -183,11 +194,18 @@ unsafe extern "C" fn kmain() -> ! {
     drop(registry);
 
     if nics.is_empty() {
-        panic!(
-            "no recognised NIC; PCI enumerated {} devices, hyperv={}",
-            p.pci.enumerate().len(),
-            is_hyperv
-        );
+        match nic_filter {
+            Some(name) => panic!(
+                "no NIC matched nic={name}; PCI enumerated {} devices, hyperv={}",
+                p.pci.enumerate().len(),
+                is_hyperv
+            ),
+            None => panic!(
+                "no recognised NIC; PCI enumerated {} devices, hyperv={}",
+                p.pci.enumerate().len(),
+                is_hyperv
+            ),
+        }
     }
 
     for n in &nics {

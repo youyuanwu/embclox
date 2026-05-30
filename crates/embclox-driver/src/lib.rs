@@ -17,7 +17,7 @@ pub mod nic;
 pub mod registry;
 
 pub use bus::{Bus, VmBusEnum};
-pub use defaults::register_default_drivers;
+pub use defaults::{register_default_drivers, register_named_driver};
 pub use driver::{PciDriver, ProbeCtx, ProbedNic, VmBusDriver};
 pub use error::ProbeError;
 pub use nic::{DynNic, EmbcloxNic};

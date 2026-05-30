@@ -24,14 +24,20 @@
 #       cmake --build build --target kernel-hyperv-image
 #     This produces build/kernel-hyperv.iso.
 #
-# Usage (from PowerShell or WSL):
-#   .\scripts\hyperv-boot-test.ps1
-#   .\scripts\hyperv-boot-test.ps1 -Elevate
-#   .\scripts\hyperv-boot-test.ps1 -Iso C:\some\other\kernel.iso
-#   .\scripts\hyperv-boot-test.ps1 -SwitchName 'Default Switch'  # not recommended
-#
-# From WSL:
+# Usage (from WSL bash, the canonical dev environment):
+#   powershell.exe -ExecutionPolicy Bypass -File scripts/hyperv-boot-test.ps1
+#   powershell.exe -ExecutionPolicy Bypass -File scripts/hyperv-boot-test.ps1 -Elevate
 #   powershell.exe -ExecutionPolicy Bypass -File scripts/hyperv-boot-test.ps1 -Iso build/kernel-hyperv.iso
+#   powershell.exe -ExecutionPolicy Bypass -File scripts/hyperv-boot-test.ps1 -SwitchName 'Default Switch'  # not recommended
+#
+# To exercise the tulip driver on Hyper-V (instead of NetVSC), attach a
+# Hyper-V Legacy Network Adapter (DEC 21140 emulation) and point at the
+# kernel-hyperv-tulip ISO whose cmdline forces `nic=tulip`:
+#   cmake --build build --target kernel-hyperv-tulip-image
+#   powershell.exe -ExecutionPolicy Bypass -File scripts/hyperv-boot-test.ps1 -Iso build/kernel-hyperv-tulip.iso -AddLegacyNic
+#
+# From PowerShell directly:
+#   .\scripts\hyperv-boot-test.ps1 -Iso build\kernel-hyperv.iso
 #
 # Why a dedicated Internal vSwitch instead of Default Switch:
 # Hyper-V's Default Switch (NAT/ICS) accumulates Permanent ARP entries
@@ -49,6 +55,7 @@ param(
     [string]$SwitchName = "embclox-test",
     [string]$ExpectedHostIp = "192.168.234.1",
     [string]$StaticMac = "00155DEB0100",
+    [switch]$AddLegacyNic,
     [switch]$Elevate
 )
 
@@ -182,16 +189,38 @@ Write-Host "COM1 configured: $pipePath"
 Get-VMNetworkAdapter -VMName $VMName | Connect-VMNetworkAdapter -SwitchName $SwitchName
 Write-Host "Network adapter connected to vSwitch: $SwitchName"
 
-# Pin a static MAC so the host's ARP cache stays valid across runs.
-# Hyper-V dynamic MACs change every New-VM (00:15:5D:...:dc, dd, de, ...);
-# the host's ARP entry for 192.168.234.50 then points at the previous run's
-# MAC and Windows ignores the new VM's gratuitous ARP, silently breaking
-# the TCP probe. The chosen MAC is in Hyper-V's prefix (00:15:5D) with a
-# distinctive suffix (EB:01:00 -> "embclox 1 0") that won't collide with
-# Hyper-V dynamic allocation (Hyper-V increments from a host-derived base
-# in the lower bytes; EB:01:00 is well outside any allocator range).
-Set-VMNetworkAdapter -VMName $VMName -StaticMacAddress $StaticMac
-Write-Host "Static MAC pinned: $StaticMac"
+if ($AddLegacyNic) {
+    # Replace the synthetic NIC with a Legacy Network Adapter (DEC 21140
+    # emulation). Required to exercise the tulip driver path on Hyper-V
+    # — the synthetic NIC routes through VMBus/NetVSC, which the unified
+    # kernel always prefers when both are present. With nic=tulip in the
+    # cmdline the kernel refuses NetVSC, so we also need to actually give
+    # the VM a tulip-class device.
+    #
+    # MAC handling: tulip's emulated EEPROM doesn't expose a usable MAC
+    # on Hyper-V, so the kernel-side driver falls back to a random MAC
+    # and announces it via the tulip setup-frame. That source MAC won't
+    # match the vNIC's configured MAC, so the Hyper-V vSwitch would
+    # otherwise drop every outbound frame as a spoof. Enable
+    # MacAddressSpoofing so the switch accepts whatever the guest sends.
+    # Don't pin a static vNIC MAC — let Hyper-V keep its default and
+    # rely on the guest's gratuitous ARP to populate the host ARP cache.
+    Get-VMNetworkAdapter -VMName $VMName | Remove-VMNetworkAdapter
+    Add-VMNetworkAdapter -VMName $VMName -IsLegacy $true -SwitchName $SwitchName
+    Set-VMNetworkAdapter -VMName $VMName -MacAddressSpoofing On
+    Write-Host "Legacy NIC attached (DEC 21140 emulation, vSwitch=$SwitchName, MAC spoofing on)"
+} else {
+    # Pin a static MAC so the host's ARP cache stays valid across runs.
+    # Hyper-V dynamic MACs change every New-VM (00:15:5D:...:dc, dd, de, ...);
+    # the host's ARP entry for 192.168.234.50 then points at the previous run's
+    # MAC and Windows ignores the new VM's gratuitous ARP, silently breaking
+    # the TCP probe. The chosen MAC is in Hyper-V's prefix (00:15:5D) with a
+    # distinctive suffix (EB:01:00 -> "embclox 1 0") that won't collide with
+    # Hyper-V dynamic allocation (Hyper-V increments from a host-derived base
+    # in the lower bytes; EB:01:00 is well outside any allocator range).
+    Set-VMNetworkAdapter -VMName $VMName -StaticMacAddress $StaticMac
+    Write-Host "Static MAC pinned: $StaticMac"
+}
 
 Write-Host "VM created (Gen1, 256MB, DVD boot, COM1 serial)"
 
