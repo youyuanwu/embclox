@@ -1,5 +1,12 @@
 # Design: Hyper-V Gen1 Integration (ReactOS Path)
 
+> **Historical note (May 2026):** this doc planned a tulip-based
+> Hyper-V Gen1 fallback before the full VMBus/NetVSC path landed.
+> References to `examples-hyperv` and `examples-hyperv-gen1` predate
+> the unified `examples-kernel` retirement; the working Hyper-V path
+> today is `examples-kernel` + `crates/embclox-driver` (see
+> [driver-model.md](./driver-model.md)).
+
 ## Motivation
 
 Hyper-V Gen2 VMs expose only synthetic (VMBus) devices. While the

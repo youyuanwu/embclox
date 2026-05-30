@@ -97,7 +97,7 @@ impl Channel {
     ///
     /// Caller must have already wired the SINT2 ISR + APIC timer
     /// (the runtime helpers handle this; see
-    /// `examples-hyperv/src/main.rs` for the canonical setup order).
+    /// `examples-kernel/src/main.rs` for the canonical setup order).
     pub fn recv_with_timeout(
         &self,
         buf: &mut [u8],

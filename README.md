@@ -14,9 +14,9 @@ targeting QEMU and Hyper-V (including Azure Gen1).
 | [`crates/embclox-tulip/`](crates/embclox-tulip/README.md) | DEC 21143 (Tulip) NIC driver |
 | [`crates/embclox-hyperv/`](crates/embclox-hyperv/README.md) | Hyper-V VMBus + NetVSC driver |
 | [`crates/embclox-core/`](crates/embclox-core/README.md) | Shared driver glue (e1000_embassy, BootDmaAllocator, etc.) |
-| [`examples-e1000/`](examples-e1000/README.md) | Limine boot, e1000 NIC, QEMU/KVM TCP echo |
-| [`examples-tulip/`](examples-tulip/README.md) | Limine boot, Tulip NIC, QEMU SLIRP TCP echo |
-| [`examples-hyperv/`](examples-hyperv/README.md) | Limine boot, NetVSC over VMBus, local Hyper-V + Azure Gen1 TCP echo |
+| [`examples-e1000/`](examples-e1000/README.md) | Limine boot, e1000 NIC, QEMU/KVM TCP echo (one-driver reference) |
+| [`examples-tulip/`](examples-tulip/README.md) | Limine boot, Tulip NIC, QEMU SLIRP TCP echo (one-driver reference) |
+| [`examples-kernel/`](examples-kernel/README.md) | Unified binary: registry picks e1000/tulip/NetVSC at boot. Canonical reference; targets QEMU + local Hyper-V + Azure Gen1 |
 | `qemu-tests/unit/` | no_std unit tests run inside QEMU |
 | [`tests/infra/`](tests/infra/README.md) | Bicep templates for Azure Gen1 deployment |
 | `scripts/` | `qemu-test.sh`, `hyperv-*.ps1`, `mkvhd.sh` |
@@ -25,8 +25,8 @@ targeting QEMU and Hyper-V (including Azure Gen1).
 
 ```bash
 cmake -B build
-cmake --build build --target tulip-image hyperv-image
-ctest --test-dir build --output-on-failure   # 5 tests, ~60s
+cmake --build build --target images
+ctest --test-dir build --output-on-failure   # 6 tests, ~65s
 ```
 
 Per-crate (faster):
@@ -34,7 +34,7 @@ Per-crate (faster):
 ```bash
 cargo check -p embclox-hal-x86
 cargo test  -p embclox-async        # host-side unit tests
-cd examples-hyperv && cargo build --release
+cd examples-kernel && cargo build --release
 ```
 
 `cargo clippy --workspace` does NOT work — examples are `no_std`
@@ -42,16 +42,16 @@ binaries with their own `panic_impl`. Run clippy per-crate.
 
 ## Running an example
 
-**QEMU (Tulip):**
+**QEMU (unified kernel, e1000 NIC):**
 ```bash
-cmake --build build --target qemu-tulip
+cmake --build build --target qemu-kernel
 ```
 
 **Local Hyper-V Gen1 (NetVSC):**
 ```powershell
 .\scripts\hyperv-setup-vswitch.ps1   # one-time, as Administrator
 powershell.exe -ExecutionPolicy Bypass -File scripts/hyperv-boot-test.ps1 \
-    -Iso build/hyperv.iso
+    -Iso build/kernel-hyperv.iso
 ```
 
 **Azure Gen1:** see [`tests/infra/README.md`](tests/infra/README.md).

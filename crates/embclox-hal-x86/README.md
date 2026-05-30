@@ -76,12 +76,14 @@ before the embassy executor is up.
 
 ## Example crates that use this HAL
 
-- `examples-e1000` — Intel e1000 NIC on QEMU
-- `examples-tulip` — DEC Tulip NIC on QEMU + Hyper-V Gen1
-- `examples-hyperv` — NetVSC synthetic NIC on Hyper-V/Azure Gen1
-- `examples-kernel` — unified binary; picks whichever NIC is present
-  via the [`embclox-driver`](../embclox-driver/README.md) registry
-- `qemu-tests/unit` — host-side HAL/driver test harness
+- `examples-kernel` \u2014 unified binary; picks whichever NIC is present
+  (e1000 / tulip / NetVSC over VMBus) via the
+  [`embclox-driver`](../embclox-driver/README.md) registry. Canonical
+  reference for QEMU + local Hyper-V + Azure Gen1.
+- `examples-e1000` \u2014 Intel e1000 NIC on QEMU (one-driver reference).
+- `examples-tulip` \u2014 DEC Tulip NIC on QEMU + Hyper-V Gen1 (one-driver
+  reference).
+- `qemu-tests/unit` \u2014 host-side HAL/driver test harness.
 
 All four boot via Limine (BIOS+UEFI ISO from `cmake --build build --target
 {name}-image`).

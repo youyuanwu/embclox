@@ -33,7 +33,7 @@ embclox_hal_x86::limine_boot_requests!(limine_boot);
 /// SINT2 ISR can clear per-channel event flags.
 static SIEFP_VADDR: AtomicUsize = AtomicUsize::new(0);
 
-/// SynIC SINT2 → VMBus handler. Identical to examples-hyperv: clear the
+/// SynIC SINT2 → VMBus handler: clear the
 /// event-flag bits the host set, wake `NETVSC_WAKER`. SINT MSR is
 /// configured auto-EOI, so no LAPIC EOI here.
 extern "x86-interrupt" fn vmbus_isr(_frame: InterruptStackFrame) {
@@ -81,8 +81,9 @@ unsafe extern "C" fn kmain() -> ! {
     );
     info!("embclox kernel example booting (Limine)");
     // Marker scanned by scripts/hyperv-boot-test.ps1 to confirm the
-    // kernel reached `kmain`. Same string as examples-hyperv so the
-    // existing PS test works against either ISO unchanged.
+    // kernel reached `kmain`. Kept the same string the original
+    // examples-hyperv binary emitted so the PS test stayed unchanged
+    // through Phase 3c.
     info!("HYPERV BOOT PASSED");
 
     // --- Interrupt + APIC infrastructure -------------------------------
@@ -278,8 +279,9 @@ async fn echo_task(stack: &'static Stack<'static>) {
     // Wait for an IPv4 address (immediate for static, ~1-3s for DHCP).
     loop {
         if let Some(cfg) = stack.config_v4() {
-            // Marker for scripts/hyperv-boot-test.ps1 — same format as
-            // examples-hyperv so the existing PS test works unchanged.
+            // Marker for scripts/hyperv-boot-test.ps1 — string format
+            // inherited from the retired examples-hyperv so the PS
+            // test stayed unchanged through Phase 3c.
             info!("PHASE4B: IPv4 configured: {}", cfg.address);
             if let Some(gw) = cfg.gateway {
                 info!("PHASE4B: gateway: {}", gw);

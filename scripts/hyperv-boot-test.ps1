@@ -8,11 +8,9 @@
 # Internal vSwitch, and probes TCP echo on port 1234.
 #
 # Default target: build/kernel-hyperv.iso (the unified examples-kernel
-# binary baked with `cmdline: net=static,ip=192.168.234.50/24,gw=192.168.234.1`,
-# matching the dedicated `embclox-test` Internal vSwitch). Use -Iso to
-# point at the one-driver examples-hyperv reference instead:
-#   .\scripts\hyperv-boot-test.ps1 -Iso build\hyperv.iso
-# Both ISOs emit the same PHASE4B / VMBUS / NETVSC marker strings.
+# binary baked with `cmdline: net=static ip=192.168.234.50/24
+# gw=192.168.234.1`, matching the dedicated `embclox-test` Internal
+# vSwitch).
 #
 # Prerequisites:
 #   - Hyper-V enabled (Windows feature)
@@ -24,14 +22,12 @@
 #   - Build the ISO first (from WSL or Linux):
 #       cmake -B build
 #       cmake --build build --target kernel-hyperv-image
-#     This produces build/kernel-hyperv.iso. For the one-driver
-#     reference use `--target hyperv-image` and pass `-Iso
-#     build/hyperv.iso`.
+#     This produces build/kernel-hyperv.iso.
 #
 # Usage (from PowerShell or WSL):
 #   .\scripts\hyperv-boot-test.ps1
 #   .\scripts\hyperv-boot-test.ps1 -Elevate
-#   .\scripts\hyperv-boot-test.ps1 -Iso build\hyperv.iso
+#   .\scripts\hyperv-boot-test.ps1 -Iso C:\some\other\kernel.iso
 #   .\scripts\hyperv-boot-test.ps1 -SwitchName 'Default Switch'  # not recommended
 #
 # From WSL:

@@ -2,7 +2,7 @@
 
 Bare-metal kernel demonstrating Intel e1000 NIC + embassy-net TCP echo
 on QEMU/KVM. Boots via **Limine** (BIOS+UEFI ISO image) — same boot
-pipeline as `examples-tulip` and `examples-hyperv`.
+pipeline as `examples-tulip` and `examples-kernel`.
 
 Static IP `10.0.2.15/24` matches QEMU SLIRP defaults.
 

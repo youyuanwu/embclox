@@ -22,15 +22,13 @@ imports stay fast and free.
 
 | VHD | Driver model | Use on Azure? |
 |-----|-------|---------------|
-| `build/kernel.vhd` | Unified registry (picks NetVSC at boot) | ✅ **yes** — production path |
-| `build/hyperv.vhd` | NetVSC (VMBus), one-driver reference | ✅ works — keep for minimal debugging |
+| `build/kernel.vhd` | Unified registry (picks NetVSC at boot) | ✅ **yes** — only supported path |
 | `build/tulip.vhd` | DEC 21140 (PCI) | ❌ no — Azure Gen1 doesn't expose Tulip on PCI |
 
 Azure Gen1 VMs only expose chipset bridges + a Hyper-V synthetic VGA on
 PCI. Networking goes through VMBus NetVSC, so any kernel that wants
-network on Azure must include the NetVSC driver. The unified
-`kernel.vhd` is the canonical choice; `hyperv.vhd` stays as a stripped-
-down one-driver reference for VMBus debugging.
+network on Azure must include the NetVSC driver. `kernel.vhd` is the
+only artefact that does.
 
 ## Prerequisites
 
@@ -38,8 +36,7 @@ down one-driver reference for VMBus debugging.
 - VHD built locally:
   ```sh
   cmake -B build
-  cmake --build build --target kernel-vhd   # canonical (unified)
-  # or: cmake --build build --target hyperv-vhd   # one-driver reference
+  cmake --build build --target kernel-vhd
   ```
 
 ## Deploy

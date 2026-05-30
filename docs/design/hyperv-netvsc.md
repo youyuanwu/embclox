@@ -13,10 +13,10 @@ VMBus channel: `F8615163-DF3E-46C5-913F-F2D2F965ED0E`
 | NVSP — version negotiation, recv/send buffer GPADLs | `crates/embclox-hyperv/src/netvsc.rs` | NVSP v6.1 negotiated on local Hyper-V Gen1 + Azure Gen1 |
 | RNDIS — init, MAC/MTU query, packet filter | `crates/embclox-hyperv/src/{nvsp_msg.rs,nvsp_types.rs}` | RNDIS v1.0, MAC/MTU read back on both |
 | RNDIS_PACKET_MSG TX/RX | `netvsc.rs::transmit_with` / `recv_with` | Gratuitous ARP + DHCP DISCOVER → reply received |
-| SynIC SINT2 → AtomicWaker, with SIEFP event-flag clear | `examples-hyperv/src/main.rs::vmbus_isr` + `netvsc::NETVSC_WAKER` | TCP echo on local Hyper-V + Azure (see [SIEFP event-flag clearing](#siefp-event-flag-clearing--required-for-host→guest-rx)) |
+| SynIC SINT2 → AtomicWaker, with SIEFP event-flag clear | `examples-kernel/src/main.rs::vmbus_isr` + `netvsc::NETVSC_WAKER` | TCP echo on local Hyper-V + Azure (see [SIEFP event-flag clearing](#siefp-event-flag-clearing--required-for-host→guest-rx)) |
 | `embassy_net_driver::Driver` impl | `crates/embclox-hyperv/src/netvsc_embassy.rs` | TCP echo @ port 1234 verified locally + on Azure |
-| Cmdline-driven DHCP/static selection | `embclox_hal_x86::cmdline` + `examples-hyperv/limine.conf` | Both modes parse correctly |
-| Azure Gen1 deployment | `tests/infra/{storage,vm}.bicep` + `cmake --build build --target hyperv-vhd` | TCP echo from public Internet to bare-metal kernel: `echo X \| nc <public-ip> 1234` returns `X` |
+| Cmdline-driven DHCP/static selection | `embclox_hal_x86::cmdline` + `examples-kernel/limine{,-hyperv,-azure}.conf` | Both modes parse correctly |
+| Azure Gen1 deployment | `tests/infra/{storage,vm}.bicep` + `cmake --build build --target kernel-vhd` | TCP echo from public Internet to bare-metal kernel: `echo X \| nc <public-ip> 1234` returns `X` |
 | Shared APIC-timer + executor runtime | `crates/embclox-hal-x86/src/runtime.rs` | All 5 ctest pass; e1000/tulip/hyperv all use `hlt`-on-idle (see [LAPIC timer ISR — implemented](#lapic-timer-isr--implemented-shared-runtime)) |
 
 ## Architecture
@@ -56,15 +56,17 @@ sufficient).
 
 ## Network mode at boot
 
-`examples-hyperv/limine.conf` exposes two boot menu entries that select
-the embassy-net config via the kernel command line:
+`examples-kernel/limine{,-hyperv,-azure}.conf` are the three Limine
+configs baked into the kernel ISOs/VHDs; each selects the embassy-net
+config via the kernel command line:
 
-| Entry | cmdline | Used for |
-|-------|---------|----------|
-| static (default) | (empty) | local Hyper-V on `embclox-test` Internal vSwitch |
-| DHCP | `net=dhcp` | Azure (host has a real DHCP server) |
+| Image target | Config | cmdline | Used for |
+|--------------|--------|---------|----------|
+| `kernel-image` | `limine.conf` | `net=static ip=10.0.2.15/24 gw=10.0.2.2` | QEMU SLIRP |
+| `kernel-hyperv-image` | `limine-hyperv.conf` | `net=static ip=192.168.234.50/24 gw=192.168.234.1` | local Hyper-V on `embclox-test` Internal vSwitch |
+| `kernel-vhd` | `limine-azure.conf` | `net=dhcp` | Azure (host has a real DHCP server) |
 
-Cmdline tokens parsed by [`embclox_hal_x86::cmdline`]:
+Cmdline tokens parsed by [`embclox_hal_x86::cmdline`] (whitespace-separated):
 
 | Token | Effect |
 |-------|--------|
@@ -73,8 +75,8 @@ Cmdline tokens parsed by [`embclox_hal_x86::cmdline`]:
 | `ip=A.B.C.D/N` | Override static IP+prefix |
 | `gw=A.B.C.D` | Override static gateway |
 
-Default static address is `192.168.234.50/24` (matches
-`scripts/hyperv-setup-vswitch.ps1`). See
+Default static address for `kernel-hyperv-image` is
+`192.168.234.50/24` (matches `scripts/hyperv-setup-vswitch.ps1`). See
 [`docs/dev/HyperV-Testing.md`](../dev/HyperV-Testing.md) for the rationale
 behind the dedicated Internal vSwitch.
 
@@ -99,7 +101,7 @@ and TCP echo all work today on local Hyper-V, QEMU, and Azure.
   currently reports `LinkState::Up` unconditionally. Linux's
   `rndis_filter_receive_indicate_status` is the reference.
 
-- **CI on Azure.** The bicep templates and `hyperv-vhd` cmake target
+- **CI on Azure.** The bicep templates and `kernel-vhd` cmake target
   are in place; a CI job that runs `az deployment group create`,
   probes TCP echo, and tears down would catch NetVSC regressions
   against a real production Hyper-V host (not local Default Switch).
@@ -180,7 +182,7 @@ The SIEFP page address is published to the example's ISR via:
    without a context.
 
 `vmbus_isr` in
-[`examples-hyperv/src/main.rs`](../../examples-hyperv/src/main.rs)
+[`examples-kernel/src/main.rs`](../../examples-kernel/src/main.rs)
 walks the 32 `u64` words of the SINT2 slot on every SINT2, zeroing
 any non-zero word with a volatile read/write pair, then wakes
 `NETVSC_WAKER`. Single-CPU + interrupt context means a non-atomic
@@ -230,7 +232,7 @@ accepts both and they keep us on the well-trodden Linux path:
 ## LAPIC timer ISR — implemented (shared runtime)
 
 The executor poll loops in all three examples (`examples-e1000`,
-`examples-tulip`, `examples-hyperv`) used to busy-spin and call
+`examples-tulip`, `examples-kernel`) used to busy-spin and call
 `on_timer_tick()` + a "belt-and-braces" `WAKER.wake()` every
 iteration. That defeated the waker pattern (every netvsc/tulip-bound
 task got marked ready every loop) and pinned each guest CPU at 100%
@@ -313,8 +315,9 @@ correctness issue.
 - `crates/embclox-hyperv/src/{nvsp_msg.rs,nvsp_types.rs,ffi.rs}` — protocol parsers/builders + bindgen FFI
 - `crates/embclox-hyperv/include/{nvspprotocol.h,rndis_msvm.h,VmbusPacketFormat.h}` — Microsoft mu_msvm headers (BSD-2-Clause-Patent)
 - `crates/embclox-hyperv/include/README.md` — header provenance
-- `examples-hyperv/src/main.rs` — Limine boot, IDT, embassy executor
-- `examples-hyperv/limine.conf` — cmdline-selected boot menu entries
+- `examples-kernel/src/main.rs` — Limine boot, IDT, embassy executor
+- `examples-kernel/limine{,-hyperv,-azure}.conf` — cmdline-selected
+  network mode (one cmdline per ISO/VHD artefact)
 - `scripts/hyperv-{setup-vswitch,boot-test}.ps1` — local Hyper-V test harness
 - `docs/dev/HyperV-Testing.md` — vSwitch setup + ICS pollution writeup
 - `docs/design/vmbus.md` — underlying VMBus implementation

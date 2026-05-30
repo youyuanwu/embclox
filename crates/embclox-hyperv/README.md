@@ -40,7 +40,7 @@ Caller is responsible for:
   internal `block_on_hlt` runner from `hlt` while waiting for host
   responses
 
-See `examples-hyperv/src/main.rs` for the canonical setup order.
+See `examples-kernel/src/main.rs` for the canonical setup order.
 
 ## Boot-time waits
 

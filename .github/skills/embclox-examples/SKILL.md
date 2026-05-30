@@ -7,8 +7,8 @@ description: "How to develop bare-metal x86_64 Rust kernel examples in the embcl
 
 Use this skill when adding a new example kernel under `examples-<name>/`,
 modifying an existing one (`examples-e1000`, `examples-tulip`,
-`examples-hyperv`, `examples-kernel`), wiring a new device driver into
-an example, or investigating why a CI/Hyper-V/Azure run misbehaves.
+`examples-kernel`), wiring a new device driver into an example, or
+investigating why a CI/Hyper-V/Azure run misbehaves.
 
 ## Repository orientation
 
@@ -23,10 +23,9 @@ embclox/
 │   ├── embclox-{e1000,tulip,hyperv}/  # device drivers
 │   ├── embclox-driver/      # bus/driver/device + EmbcloxNic + DriverRegistry
 │   └── embclox-core/        # shared driver glue (e1000_embassy, etc.)
-├── examples-e1000/          # Limine boot, e1000 NIC, QEMU/KVM
-├── examples-tulip/          # Limine boot, Tulip NIC, QEMU SLIRP
-├── examples-hyperv/         # Limine boot, NetVSC over VMBus, Hyper-V/Azure
-├── examples-kernel/         # Unified: registry picks NIC at boot
+├── examples-e1000/          # Limine boot, e1000 NIC, QEMU/KVM (one-driver ref)
+├── examples-tulip/          # Limine boot, Tulip NIC, QEMU SLIRP (one-driver ref)
+├── examples-kernel/         # Unified: registry picks NIC at boot (QEMU + Hyper-V + Azure)
 ├── qemu-tests/unit/         # Limine-booted host-side test harness
 ├── tests/infra/             # bicep templates for Azure deployment
 ├── scripts/                 # qemu-test.sh, hyperv-*.ps1, mkvhd.sh
@@ -110,9 +109,12 @@ When adding a new NIC family:
    [examples-kernel/CMakeLists.txt](../../../examples-kernel/CMakeLists.txt)
    that boots `kernel.iso` against `-device <name>`.
 
-The per-NIC `examples-{e1000,tulip,hyperv}` crates remain as small,
+The per-NIC `examples-{e1000,tulip}` crates remain as small,
 focused references for one-driver bring-up and as the regression
-target for that single driver's wiring.
+target for that single driver's wiring on QEMU. The Hyper-V/NetVSC
+path is exercised only through `examples-kernel` (the registry +
+the `embclox_driver::drivers::netvsc` wrapper); the standalone
+`examples-hyperv` binary was retired in Phase 3c.
 
 ## Network configuration
 
@@ -150,18 +152,20 @@ The kernel reads its cmdline from `boot_info.cmdline` returned by
 cargo check -p embclox-hal-x86
 
 # Per-example build (cross to x86_64-unknown-none via .cargo/config.toml):
-cd examples-hyperv && cargo build --release
+cd examples-kernel && cargo build --release
 
 # Image artefacts (CMake + xorriso/dd) — every example uses the same
 # Limine ISO pipeline:
 cmake -B build
-cmake --build build --target e1000-image     # -> build/e1000.iso
-cmake --build build --target unit-test-image # -> build/unit-tests.iso
-cmake --build build --target tulip-image     # -> build/tulip.iso
-cmake --build build --target hyperv-image    # -> build/hyperv.iso (local)
-cmake --build build --target hyperv-vhd      # -> build/hyperv.vhd  (Azure)
-cmake --build build --target kernel-image    # -> build/kernel.iso (unified)
-cmake --build build --target kernel-vhd      # -> build/kernel.vhd  (Azure)
+cmake --build build --target e1000-image          # -> build/e1000.iso
+cmake --build build --target unit-test-image      # -> build/unit-tests.iso
+cmake --build build --target tulip-image          # -> build/tulip.iso
+cmake --build build --target kernel-image         # -> build/kernel.iso (QEMU/generic)
+cmake --build build --target kernel-hyperv-image  # -> build/kernel-hyperv.iso (local Hyper-V vSwitch)
+cmake --build build --target kernel-vhd           # -> build/kernel.vhd  (Azure Gen1)
+
+# Or all of the above:
+cmake --build build --target images
 
 # Run all CI tests (6 currently: e1000-echo, unit, tulip-{boot,echo},
 # kernel-echo-{e1000,tulip}):
@@ -201,7 +205,7 @@ powershell.exe -ExecutionPolicy Bypass -File scripts/hyperv-setup-vswitch.ps1
 
 # Per-test (from WSL or PowerShell):
 powershell.exe -ExecutionPolicy Bypass -File scripts/hyperv-boot-test.ps1 \
-    -Iso build/hyperv.iso
+    -Iso build/kernel-hyperv.iso
 ```
 
 The script creates a Gen1 VM, attaches the ISO, reads serial via named
@@ -213,19 +217,19 @@ vSwitch instead of the Default Switch (ICS pollution writeup).
 
 ```bash
 # 1. Build VHD (uses limine-azure.conf with net=dhcp)
-cmake --build build --target hyperv-vhd
+cmake --build build --target kernel-vhd
 
 # 2. Create storage RG + storage account, upload VHD (one time per VHD):
 az group create --name embclox-storage --location <region>
 az deployment group create --resource-group embclox-storage \
     --template-file tests/infra/storage.bicep
-# (then az storage blob upload --container vhds --file build/hyperv.vhd ...)
+# (then az storage blob upload --container vhds --file build/kernel.vhd ...)
 
 # 3. Create VM RG + VM (per test session):
 az group create --name embclox-vm --location <region>
 az deployment group create --resource-group embclox-vm \
     --template-file tests/infra/vm.bicep \
-    --parameters storageResourceGroup=embclox-storage vhdName=hyperv.vhd
+    --parameters storageResourceGroup=embclox-storage vhdName=kernel.vhd
 
 # 4. Verify TCP echo from public Internet:
 echo HELLO | nc <public-ip> 1234   # returns HELLO
@@ -258,7 +262,7 @@ extern "x86-interrupt" fn my_handler(_: InterruptStackFrame) {
 
 Hyper-V SynIC SINT vectors are special: they configure auto-EOI in the
 SINT MSR (bit 17) and so must NOT call `lapic_eoi`. See
-`examples-hyperv/src/main.rs::vmbus_isr`.
+`examples-kernel/src/main.rs::vmbus_isr`.
 
 Register the handler **after** `idt::init()`:
 

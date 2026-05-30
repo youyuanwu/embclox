@@ -149,7 +149,7 @@ After that, the test scripts work without elevation:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File scripts/hyperv-boot-test.ps1 \
-  -Iso build/hyperv.iso
+  -Iso build/kernel-hyperv.iso
 ```
 
 ## Where DHCP testing belongs
@@ -182,14 +182,15 @@ deliberate split:
 
 ## Switching to DHCP at boot time
 
-The hyperv example reads the Limine kernel command line at boot and
-selects the network mode from it. `examples-hyperv/limine.conf` ships
-two boot menu entries:
+The unified kernel reads the Limine kernel command line at boot and
+selects the network mode from it via `embclox_hal_x86::cmdline`. The
+two cmake targets bake different cmdlines:
 
-| Entry | cmdline | Network mode |
-|-------|---------|--------------|
-| `/embclox Hyper-V Example (static IP 192.168.234.50/24)` (default) | (empty) | static `192.168.234.50/24` gw `192.168.234.1` |
-| `/embclox Hyper-V Example (DHCP)` | `net=dhcp` | embassy-net DHCPv4 |
+| ISO/VHD target | cmdline | Network mode |
+|----------------|---------|--------------|
+| `kernel-hyperv-image` | `net=static ip=192.168.234.50/24 gw=192.168.234.1` | static, matches the `embclox-test` vSwitch |
+| `kernel-image` | `net=static ip=10.0.2.15/24 gw=10.0.2.2` | static, matches QEMU SLIRP |
+| `kernel-vhd` | `net=dhcp` | DHCPv4 (Azure DHCP is production-grade) |
 
 Recognised cmdline tokens (whitespace-separated):
 
@@ -201,9 +202,10 @@ Recognised cmdline tokens (whitespace-separated):
 | `gw=A.B.C.D` | Override static gateway |
 
 To test the DHCP path on Hyper-V, either:
-- Pick the second boot menu entry interactively at the Limine prompt
-  (3-second timeout — press a key to interrupt the auto-boot), or
-- Edit `examples-hyperv/limine.conf` to put the DHCP entry first, or
+- Build `kernel-vhd` and attach it to a Hyper-V Gen1 VM with a vSwitch
+  that runs a real DHCP server, or
+- Edit `examples-kernel/limine-hyperv.conf` to set `cmdline: net=dhcp`
+  and rebuild `kernel-hyperv-image`, or
 - Run on Azure where DHCP is production-grade.
 
 Without a DHCP server on the chosen vSwitch the DHCP path will hang

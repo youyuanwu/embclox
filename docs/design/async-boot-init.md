@@ -52,7 +52,7 @@ Anyone using `block_on_hlt` must ensure:
    not ready and let `block_on_hlt` perform the halt. Don't call
    `hlt` directly from inside the future.
 
-`examples-hyperv/src/main.rs::kmain` shows the canonical setup order:
+`examples-kernel/src/main.rs::kmain` shows the canonical setup order:
 TSC calibration → LAPIC enable → `start_apic_timer` → install
 `vmbus_isr` → call `embclox_hyperv::init` (which uses `block_on_hlt`
 internally).

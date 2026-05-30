@@ -31,8 +31,6 @@ add_custom_target(check
         --target ${TARGET} -- -D warnings
     COMMAND cargo clippy --manifest-path examples-tulip/Cargo.toml
         --target ${TARGET} -- -D warnings
-    COMMAND cargo clippy --manifest-path examples-hyperv/Cargo.toml
-        --target ${TARGET} -- -D warnings
     COMMAND cargo clippy --manifest-path examples-kernel/Cargo.toml
         --target ${TARGET} -- -D warnings
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -44,9 +42,6 @@ add_subdirectory(examples-e1000)
 
 # Tulip example (Limine boot, ISO/VHD)
 add_subdirectory(examples-tulip)
-
-# Hyper-V example (Limine boot, ISO)
-add_subdirectory(examples-hyperv)
 
 # Unified kernel example (Limine boot, ISO; PCI + VMBus via the driver registry)
 add_subdirectory(examples-kernel)
@@ -61,8 +56,6 @@ add_custom_target(images
         unit-test-image
         tulip-image
         tulip-vhd
-        hyperv-image
-        hyperv-vhd
         kernel-image
         kernel-hyperv-image
         kernel-vhd

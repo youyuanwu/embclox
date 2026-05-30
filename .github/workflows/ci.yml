@@ -45,10 +45,6 @@ jobs:
         working-directory: examples-tulip
         run: cargo clippy -- -D warnings
 
-      - name: Clippy hyperv example
-        working-directory: examples-hyperv
-        run: cargo clippy -- -D warnings
-
       - name: Clippy kernel example
         working-directory: examples-kernel
         run: cargo clippy -- -D warnings

@@ -729,15 +729,16 @@ the tree** as of the current commit:
   Config) -> Peripherals`); no `bootloader_api` constructor exists.
 - [examples-e1000/CMakeLists.txt](../../examples-e1000/CMakeLists.txt),
   [examples-tulip/CMakeLists.txt](../../examples-tulip/CMakeLists.txt),
-  and [examples-hyperv/CMakeLists.txt](../../examples-hyperv/CMakeLists.txt)
+  and [examples-kernel/CMakeLists.txt](../../examples-kernel/CMakeLists.txt)
   all build Limine BIOS+UEFI ISOs through the same pipeline.
 - The workspace has no remaining `bootloader_api` references.
 
 Why Limine is the standard:
 
 - **Hyper-V Gen1 deployment requires it.** `bootloader_api` does
-  not produce Gen1-compatible images; `examples-hyperv`
-  established the working Limine path for Hyper-V/Azure.
+  not produce Gen1-compatible images; the (now-retired) per-NIC
+  `examples-hyperv` first established the working Limine path for
+  Hyper-V/Azure, which `examples-kernel` inherited.
 - **One bootloader, one HAL init path.** Two protocols would mean
   two initialisers, two `BootInfo` shapes, two memory maps to
   merge with `MemoryMapper`. Standardising removed a long-tail
@@ -919,10 +920,11 @@ grow a `remove()` method, but nothing in current examples needs it.
   crate, not a rewrite.
 - The embassy-net `Driver` impls. They stay where they are.
 - Per-driver ISRs. They remain `static extern "x86-interrupt" fn`.
-- `examples-e1000` / `examples-tulip` / `examples-hyperv` continue
+- `examples-e1000` and `examples-tulip` continue
   to exist as small, single-driver references that newcomers can
-  read in one sitting. (All three already use Limine — see
-  "Bootloader".)
+  read in one sitting. (Both use Limine — see "Bootloader".)
+  `examples-hyperv` retired in Phase 3c — its functionality is
+  covered by `examples-kernel` + `crates/embclox-driver/src/drivers/netvsc.rs`.
 
 ## Migration path
 
@@ -979,98 +981,95 @@ CI / image artefacts:
 
 The Hyper-V `scripts/hyperv-boot-test.ps1` default `-Iso` and the
 `tests/infra/` Azure recipes now point at the unified `kernel.*`
-artefacts; the per-NIC `examples-hyperv` paths remain available as
-minimal one-driver references.
+artefacts; the per-NIC `examples-hyperv` paths were retired in
+Phase 3c — see below.
 
-### Phase 3 — (Optional) Retire single-driver examples — open
+### Phase 3 — Retire single-driver examples — partially shipped
 
 The unified `examples-kernel` is the canonical reference going
-forward. The per-NIC `examples-e1000` / `examples-tulip` /
-`examples-hyperv` crates still exist as small, one-driver references
-that newcomers can read in one sitting; their ctest lanes also
-provide a per-driver regression target.
+forward. The per-NIC `examples-e1000` / `examples-tulip` crates
+still exist as small, one-driver references; `examples-hyperv` was
+retired in Phase 3c (its NetVSC bring-up is fully covered by
+`examples-kernel` + `crates/embclox-driver/src/drivers/netvsc.rs`,
+and the Hyper-V/Azure test pipeline now consumes `kernel.*`
+artefacts exclusively).
 
-#### When to execute
+#### Progress
 
-Retire them only when either trigger fires:
+| Substep | Status |
+|---------|--------|
+| 3a — extract unit-test pipeline | ✅ shipped |
+| 3b — drop `hyperv-boot` lane | ✅ shipped (dropped; `kernel-echo-{e1000,tulip}` is the superset) |
+| 3c — retire `examples-hyperv` | ✅ shipped |
+| 3d — retire `examples-tulip` | open (trigger-driven) |
+| 3e — retire `examples-e1000` | open (trigger-driven) |
 
-- **Drift signal.** One of the per-NIC binaries fails to compile or
-  boot because somebody touched the HAL and didn't update them.
-  That's the maintenance-cost-exceeds-value point the design
-  anticipates.
+#### When to execute 3d / 3e
+
+Retire each only when either trigger fires:
+
+- **Drift signal.** The per-NIC binary fails to compile or boot
+  because somebody touched the HAL and didn't update it. That's
+  the maintenance-cost-exceeds-value point.
 - **Pedagogical value subsumed.** Readers stop reaching for
-  `examples-e1000/src/main.rs` because the per-driver wrapper at
-  `crates/embclox-driver/src/drivers/e1000.rs` (~60 lines) is now
+  `examples-<nic>/src/main.rs` because the per-driver wrapper at
+  `crates/embclox-driver/src/drivers/<nic>.rs` (~60 lines) is now
   the obvious one-driver read.
 
 Until one of those happens, **leave them in place** — they cost
-~1000 LoC + 9 CMake targets + 4 ctest lanes + 3 CI clippy lanes,
-which is small relative to the regression coverage they buy.
+~530 LoC + 5 CMake targets + 3 ctest lanes + 2 CI clippy lanes
+combined, which is small relative to the regression coverage they
+buy on QEMU (`e1000-echo`, `tulip-{boot,echo}` exercise the
+per-driver boot wiring without the registry in the picture).
 
-#### Inventory
+#### Remaining inventory
 
 | Crate | LoC main.rs | CMake targets | ctest lanes | Owns also |
 |-------|------------:|---------------|-------------|-----------|
-| `examples-e1000` | ~250 | `e1000-{build,image}`, `qemu-e1000`, **`unit-test-{build,image}`** | `e1000-echo`, **`unit`** | the shared unit-test ISO pipeline |
+| `examples-e1000` | ~250 | `e1000-{build,image}`, `qemu-e1000` | `e1000-echo` | — |
 | `examples-tulip` | ~280 | `tulip-{build,image,vhd}`, `qemu-tulip` | `tulip-boot`, `tulip-echo` | private `tulip_embassy.rs`, `LimineDmaAllocator` |
-| `examples-hyperv` | ~500 | `hyperv-{build,image,vhd}`, `qemu-hyperv` | `hyperv-boot` | `limine-azure.conf`, Azure infra references (already redirected to `kernel.vhd`) |
 
-#### Substeps, ordered by dependency + risk
+#### Remaining substeps
 
-**3a. Move unit-tests out of `examples-e1000/CMakeLists.txt`** —
-prerequisite, zero-risk, can land any time. The shared
-`unit-test-build` / `unit-test-image` / `unit` ctest lane currently
-lives inside `examples-e1000/CMakeLists.txt`. Move it verbatim into
-`qemu-tests/unit/CMakeLists.txt` and `add_subdirectory(qemu-tests/unit)`
-from the root.
-
-**3b. Decide what to do with `hyperv-boot`.** It's a QEMU UEFI smoke
-that log-matches `HYPERV BOOT PASSED`. The kernel binary emits the
-same marker. Two options:
-
-- Drop it entirely — `kernel-echo-{e1000,tulip}` are a strict
-  superset (boot + stack + TCP round-trip), so the coverage is
-  already there. **Recommended.**
-- Add a `kernel-boot` lane mirroring it — only worth doing if we
-  want a fast (<15s) smoke that doesn't pay the embassy-stack tax.
-
-**3c. Retire `examples-hyperv`** — biggest payoff first (~500 LoC,
-most likely to drift because the inline SINT2 ISR / VMBus-init code
-in its `main.rs` is duplicated by the kernel).
-
-1. Delete `examples-hyperv/` directory.
-2. `Cargo.toml`: remove from `members`.
-3. Root `CMakeLists.txt`: remove `add_subdirectory(examples-hyperv)`;
-   remove `hyperv-image` / `hyperv-vhd` from `images` aggregate;
-   remove the `examples-hyperv` clippy line from `check`.
-4. `.github/workflows/ci.yml`: remove the "Clippy hyperv example"
-   lane.
-5. Apply 3b's decision to `hyperv-boot`.
-6. `tests/infra/README.md`: collapse the "Which VHD?" table back to
-   two rows (`kernel.vhd`, `tulip.vhd`); drop "one-driver reference"
-   language for the Azure path.
-7. `scripts/hyperv-boot-test.ps1`: remove the "you can also pass
-   `-Iso build/hyperv.iso`" escape hatch from the header.
-
-**3d. Retire `examples-tulip`.** Same shape. Extras:
+**3d. Retire `examples-tulip`.**
 
 - `scripts/hyperv-tulip-test.ps1` is a tulip-on-Hyper-V manual
   harness. Either delete it (rare combo) or repoint it at
   `kernel-hyperv.iso` if there's still a use case.
 - `examples-tulip/src/tulip_embassy.rs` is duplicated work that
   the registry already owns; deleting the example deletes it.
+- Remove from `Cargo.toml`, root `CMakeLists.txt` (subdir, `images`
+  aggregate, `check` clippy lane), `.github/workflows/ci.yml`
+  (clippy lane).
 
-**3e. Retire `examples-e1000`** — last. Depends on 3a. Same shape.
+**3e. Retire `examples-e1000`.** Same shape. Independently
+shippable now that 3a moved the unit-test pipeline out.
 
 #### What we keep regardless
 
 - `crates/embclox-{e1000,tulip,hyperv}` — the device-driver
   implementations; only the binary wrappers retire.
 - `crates/embclox-driver/src/drivers/{e1000,tulip,netvsc}.rs` —
-  the registry-aware per-NIC wrappers; they become the canonical
+  the registry-aware per-NIC wrappers; these are now the canonical
   one-driver read.
 - `scripts/hyperv-boot-test.ps1` and the `tests/infra/` Azure
   pipeline — already point at the unified `kernel.*` artefacts.
+
+#### Risks (recorded from the original plan)
+
+1. **Lost per-driver test isolation.** Already realised for the
+   NetVSC path post-3c: the only way to test "NetVSC works in
+   isolation" is to manually disable e1000/tulip registration in
+   the kernel binary. If a regression demands it, add a "minimal"
+   kernel-test crate that registers only one driver. Same will
+   apply to e1000/tulip post-3d/3e.
+2. **Pedagogical value.** A ~250-line one-driver `main.rs` is
+   easier to read in one sitting than `examples-kernel/src/main.rs`.
+   Mitigation: `crates/embclox-driver/src/drivers/<nic>.rs` (~60
+   lines, just the driver wrapper) becomes the one-driver read.
+3. **Real-Hyper-V coverage.** Dropped from "explicit hyperv-only
+   binary built every commit" to "Hyper-V tested only via the
+   unified kernel" in 3c. No regression seen since.
 
 #### Risks
 
@@ -1083,16 +1082,9 @@ in its `main.rs` is duplicated by the kernel).
    easier to read in one sitting than `examples-kernel/src/main.rs`.
    Mitigation: `crates/embclox-driver/src/drivers/e1000.rs` (~60
    lines, just the driver wrapper) becomes the one-driver read.
-3. **Real-Hyper-V coverage.** Drops from "explicit hyperv-only
+3. **Real-Hyper-V coverage.** Dropped from "explicit hyperv-only
    binary built every commit" to "Hyper-V tested only via the
-   unified kernel". Already true after the Phase 2 redirect; this
-   just makes it formal.
-
-#### Recommended order if the trigger fires
-
-3a + 3b first (zero-risk), then 3c (most LoC + most drift-prone),
-then 3d, then 3e. Each substep is independently shippable; no need
-to bundle.
+   unified kernel" in 3c. No regression seen since.
 
 ## Trade-offs
 
