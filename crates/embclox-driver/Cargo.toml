@@ -11,5 +11,6 @@ embclox-e1000.workspace = true
 embclox-tulip.workspace = true
 embclox-core.workspace = true
 embassy-net-driver.workspace = true
+embassy-sync.workspace = true
 x86_64.workspace = true
 log.workspace = true

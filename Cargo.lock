@@ -271,12 +271,9 @@ version = "0.1.0"
 name = "embclox-core"
 version = "0.1.0"
 dependencies = [
- "embassy-net-driver",
- "embassy-sync",
  "embclox-dma",
  "embclox-e1000",
  "embclox-hal-x86",
- "embclox-tulip",
  "log",
 ]
 
@@ -289,6 +286,7 @@ name = "embclox-driver"
 version = "0.1.0"
 dependencies = [
  "embassy-net-driver",
+ "embassy-sync",
  "embclox-core",
  "embclox-dma",
  "embclox-e1000",

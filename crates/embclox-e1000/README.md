@@ -22,8 +22,8 @@ Caller is responsible for:
 - Routing the device IRQ via the IOAPIC + installing an ISR that
   reads ICR + wakes the embassy waker
 
-For the embassy-net `Driver` impl + canonical wiring, see
-`embclox-core::e1000_embassy` and the registry wrapper at
+For the embassy-net `Driver` impl + canonical wiring, see the
+registry wrapper at
 `crates/embclox-driver/src/drivers/e1000.rs` (used by
 `examples-kernel`).
 

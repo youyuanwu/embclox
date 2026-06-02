@@ -7,8 +7,8 @@ use alloc::boxed::Box;
 use core::sync::atomic::Ordering;
 use core::task::{Context, Waker};
 use embassy_net_driver::{Capabilities, HardwareAddress, LinkState};
+use embassy_sync::waitqueue::AtomicWaker;
 use embclox_core::dma_alloc::BootDmaAllocator;
-use embclox_core::tulip_embassy::TULIP_WAKER;
 use embclox_hal_x86::pci::PciDevice;
 use embclox_hal_x86::runtime;
 use embclox_tulip::csr;
@@ -17,6 +17,11 @@ use x86_64::structures::idt::InterruptStackFrame;
 
 const VENDOR_DEC: u16 = 0x1011;
 const TULIP_DEVICES: &[u16] = &[0x0009, 0x0019];
+
+/// Waker for the tulip NIC. Signalled by [`tulip_handler`] (the ISR)
+/// and registered by [`NicTulip::register_waker`]. Lives next to its
+/// only producer + consumer rather than as a cross-crate `pub static`.
+static TULIP_WAKER: AtomicWaker = AtomicWaker::new();
 
 pub struct TulipDriver;
 

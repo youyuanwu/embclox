@@ -7,8 +7,8 @@ use alloc::boxed::Box;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::task::{Context, Waker};
 use embassy_net_driver::{Capabilities, HardwareAddress, LinkState};
+use embassy_sync::waitqueue::AtomicWaker;
 use embclox_core::dma_alloc::BootDmaAllocator;
-use embclox_core::e1000_embassy::NET_WAKER;
 use embclox_core::mmio_regs::MmioRegs;
 use embclox_e1000::E1000Device;
 use embclox_hal_x86::pci::PciDevice;
@@ -17,6 +17,11 @@ use x86_64::structures::idt::InterruptStackFrame;
 
 const VENDOR_INTEL: u16 = 0x8086;
 const E1000_DEVICES: &[u16] = &[0x100E, 0x100F, 0x10D3];
+
+/// Waker for the e1000 NIC. Signalled by [`e1000_handler`] (the ISR)
+/// and registered by [`NicE1000::register_waker`]. Lives next to its
+/// only producer + consumer rather than as a cross-crate `pub static`.
+static NET_WAKER: AtomicWaker = AtomicWaker::new();
 
 /// Marker registered with [`crate::DriverRegistry`].
 pub struct E1000Driver;
@@ -108,8 +113,7 @@ impl EmbcloxNic for NicE1000 {
             .expect("e1000: transmit_with called without TX space");
     }
     fn link_state(&mut self, _cx: &mut Context<'_>) -> LinkState {
-        // Match existing E1000Embassy semantics: report Up; real link
-        // tracking can be added when the driver exposes it.
+        // Real link tracking can be added when the driver exposes it.
         LinkState::Up
     }
     fn capabilities(&self) -> Capabilities {
