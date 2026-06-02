@@ -17,7 +17,8 @@ let pkt = rx.receive();               // returns Option<Frame>
 
 Caller is responsible for:
 - PCI scan + BAR0 mapping (`embclox_hal_x86::pci`)
-- Calling `embclox_core::e1000_helpers::reset_device(&regs)` first
+- Wrapping BAR0 in `embclox_e1000::MmioRegs::new(base_vaddr)`
+- Calling `embclox_e1000::reset_device(&regs)` first
 - Enabling bus mastering on the PCI device
 - Routing the device IRQ via the IOAPIC + installing an ISR that
   reads ICR + wakes the embassy waker

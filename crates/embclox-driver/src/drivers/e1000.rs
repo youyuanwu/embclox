@@ -9,8 +9,7 @@ use core::task::{Context, Waker};
 use embassy_net_driver::{Capabilities, HardwareAddress, LinkState};
 use embassy_sync::waitqueue::AtomicWaker;
 use embclox_core::dma_alloc::BootDmaAllocator;
-use embclox_core::mmio_regs::MmioRegs;
-use embclox_e1000::E1000Device;
+use embclox_e1000::{E1000Device, MmioRegs};
 use embclox_hal_x86::pci::PciDevice;
 use embclox_hal_x86::runtime;
 use x86_64::structures::idt::InterruptStackFrame;
@@ -45,7 +44,7 @@ impl PciDriver for E1000Driver {
         let mmio = ctx.memory.map_mmio(bar0_phys, 0x20000);
         let regs = MmioRegs::new(mmio.vaddr());
 
-        embclox_core::e1000_helpers::reset_device(&regs);
+        embclox_e1000::reset_device(&regs);
         ctx.pci.enable_bus_mastering(&dev);
 
         let dma = ctx.dma.clone();

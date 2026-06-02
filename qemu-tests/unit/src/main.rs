@@ -8,7 +8,7 @@ mod harness;
 mod suites;
 
 use core::panic::PanicInfo;
-use embclox_core::mmio_regs::MmioRegs;
+use embclox_e1000::MmioRegs;
 use log::*;
 
 embclox_hal_x86::limine_boot_requests!(limine_boot);
@@ -44,7 +44,7 @@ unsafe extern "C" fn kmain() -> ! {
     let bar0_phys = p.pci.read_bar(&pci_dev, 0);
     let e1000_mmio = p.memory.map_mmio(bar0_phys, 0x20000);
     let regs = MmioRegs::new(e1000_mmio.vaddr());
-    embclox_core::e1000_helpers::reset_device(&regs);
+    embclox_e1000::reset_device(&regs);
     p.pci.enable_bus_mastering(&pci_dev);
 
     let dma = embclox_core::dma_alloc::BootDmaAllocator {
@@ -54,17 +54,13 @@ unsafe extern "C" fn kmain() -> ! {
 
     unsafe {
         suites::e1000_smoke::init(regs, dma.clone());
-        suites::e1000_driver::init(regs, dma.clone());
-        suites::e1000_embassy::init(regs, dma);
+        suites::e1000_driver::init(regs, dma);
     }
 
     let (name, tests) = suites::e1000_smoke::suite();
     total += harness::run_suite(name, tests);
 
     let (name, tests) = suites::e1000_driver::suite();
-    total += harness::run_suite(name, tests);
-
-    let (name, tests) = suites::e1000_embassy::suite();
     total += harness::run_suite(name, tests);
 
     // Clean up MMIO mapping

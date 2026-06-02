@@ -1,5 +1,5 @@
 use embclox_core::dma_alloc::BootDmaAllocator;
-use embclox_core::mmio_regs::MmioRegs;
+use embclox_e1000::MmioRegs;
 use embclox_e1000::RegisterAccess;
 use embclox_e1000::regs::*;
 

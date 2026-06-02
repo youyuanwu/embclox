@@ -272,7 +272,6 @@ name = "embclox-core"
 version = "0.1.0"
 dependencies = [
  "embclox-dma",
- "embclox-e1000",
  "embclox-hal-x86",
  "log",
 ]

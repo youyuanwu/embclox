@@ -1,7 +1,6 @@
 use embclox_core::dma_alloc::BootDmaAllocator;
-use embclox_core::mmio_regs::MmioRegs;
-use embclox_e1000::RegisterAccess;
 use embclox_e1000::regs::*;
+use embclox_e1000::{MmioRegs, RegisterAccess};
 
 /// Global test context — shared by all e1000 driver tests.
 static mut CTX: Option<(MmioRegs, BootDmaAllocator)> = None;
@@ -33,7 +32,11 @@ fn dma() -> &'static BootDmaAllocator {
 }
 
 fn new_device() -> embclox_e1000::E1000Device<MmioRegs, BootDmaAllocator> {
-    embclox_core::e1000_helpers::new_device(regs(), dma())
+    // Reset + construct. Bus mastering is enabled once in main; each
+    // test gets a fresh device by re-resetting and re-running ring
+    // init, which is what E1000Device::new does internally.
+    embclox_e1000::reset_device(regs());
+    embclox_e1000::E1000Device::new(*regs(), dma().clone())
 }
 
 /// E1000 driver tests — each test creates and drops its own device,
