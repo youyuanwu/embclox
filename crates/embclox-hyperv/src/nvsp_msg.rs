@@ -290,6 +290,8 @@ pub enum RndisResponse<'a> {
     },
     /// RNDIS_MSG_SET_C: response to SET.
     SetComplete { req_id: u32, status: RndisStatus },
+    /// RNDIS_MSG_KEEPALIVE: host-initiated keepalive request (guest must reply).
+    KeepAlive { req_id: u32 },
     /// RNDIS_MSG_KEEPALIVE_C: response to KEEPALIVE.
     KeepAliveComplete { req_id: u32, status: RndisStatus },
     /// RNDIS_MSG_INDICATE: unsolicited status indication.
@@ -359,6 +361,12 @@ pub fn parse_rndis_response(data: &[u8]) -> Option<RndisResponse<'_>> {
             Some(RndisResponse::KeepAliveComplete {
                 req_id: c.RequestId,
                 status: RndisStatus(c.Status),
+            })
+        }
+        Some(RndisMessageType::KeepAlive) => {
+            let c = unsafe { cast_ref::<ffi::rndis_keepalive_request>(body)? };
+            Some(RndisResponse::KeepAlive {
+                req_id: c.RequestId,
             })
         }
         Some(RndisMessageType::Indicate) => {

@@ -146,6 +146,56 @@ and TCP echo all work today on local Hyper-V, QEMU, and Azure.
   path entirely (PCI passthrough of a Mellanox/Microsoft NIC).
   Major new scope, not a NetVSC concern.
 
+## Known issues
+
+None of these block the shipped TCP-echo scope (QEMU + local Hyper-V
++ Azure). They're recorded here so the next person touching this
+code doesn't have to rediscover them.
+
+### Fragility / silent-failure paths
+
+- **`negotiate_nvsp_version` trusts ordering.** The loop calls
+  `channel.recv_with_timeout` once per probe and assumes the first
+  packet is the `InitComplete` for the version we just sent. No
+  request-id correlation. Today it always works (fresh channel,
+  no pre-queued status packets), but is brittle if the host ever
+  pre-queues anything on NVSPv5+. Match on
+  `NvspResponse::InitComplete` and re-poll on anything else.
+
+- **`nvsp_request_single_queue` still log-and-continues on
+  unexpected response types.** Timeout is now a hard error, but a
+  non-`SubChannelComplete` response just warns and proceeds. Per
+  the [SIEFP section](#siefp-event-flag-clearing--required-for-host→guest-rx)
+  this completion is required on post-2026-05 hosts to unblock RX,
+  so a wrong response could still produce a silent no-RX boot.
+
+- **Init-path async helpers don't register `NETVSC_WAKER`.**
+  `recv_rndis_response_async` and `wait_for_send_section_async`
+  use `embassy_futures::yield_now()` only — no waker is registered
+  on [`NETVSC_WAKER`](../../crates/embclox-hyperv/src/netvsc.rs).
+  They depend on the 1 ms APIC tick to re-poll, so the SINT2 ISR
+  can't actually shorten the wait. Init still completes well
+  inside its 5 s timeouts, but the inconsistency with the data
+  path (which registers correctly) is worth tightening.
+
+### Performance ceilings (intentional but worth surfacing)
+
+- **Single in-flight TX (`send_section_free: bool`).** All
+  transmits serialise through send-buffer section 0, despite the
+  host advertising `section_size ≈ 6 KiB` over a 1 MiB send buffer
+  (~170 sections). Linux uses a freemap. Fine for TCP echo,
+  caps any throughput-bound workload at one frame in flight. This
+  is per-queue, separate from the [multi-queue](#performance)
+  future-work item.
+
+- **Single-slot `pending_rx` back-pressures the ring.**
+  `pump_channel` returns early as soon as `pending_rx.is_some()`,
+  leaving subsequent xfer-page packets on the ring until embassy
+  drains one. Combined with the single-section TX above this caps
+  both directions at one packet per embassy poll cycle. A small
+  `heapless::Deque<…, N>` would avoid that without adopting
+  Linux's full per-section bookkeeping.
+
 ## SIEFP event-flag clearing — required for host→guest RX
 
 After VMBus init, the host signals incoming packets on each opened
@@ -364,7 +414,7 @@ v6.1 (WIN10+). Negotiation tries highest first and falls back.
 | `0x80000005` | `RNDIS_SET_CMPLT` | H→G | Set response |
 | `0x00000001` | `RNDIS_PACKET_MSG` | Both | Data packet (Ethernet frame) |
 | `0x00000007` | `RNDIS_INDICATE_STATUS_MSG` | H→G | Link state change (not yet handled) |
-| `0x00000008` | `RNDIS_KEEPALIVE_MSG` | H→G | Keepalive (we respond) |
+| `0x00000008` | `RNDIS_KEEPALIVE_MSG` | H→G | Keepalive request (we respond inline; host rarely sends) |
 | `0x80000008` | `RNDIS_KEEPALIVE_CMPLT` | G→H | Keepalive response |
 
 ### OIDs we issue

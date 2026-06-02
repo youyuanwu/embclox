@@ -133,7 +133,10 @@ impl NetvscDevice {
 
         // Send NDIS version (fire-and-forget, per Linux netvsc_connect_vsp)
         {
-            // NDIS 6.30 for NVSPv5+, NDIS 6.1 for v4 and below
+            // Linux uses NDIS 6.30 for NVSPv5+, NDIS 6.1 for v4, NDIS 6.0
+            // for v2, and skips this entirely for v1. The host accepts
+            // either 6.1 or 6.0 for v4-and-below, so we keep the existing
+            // two-bucket selection for simplicity.
             let (major, minor) = if nvsp_version > NvspVersion::V4.as_u32() {
                 (6, 30)
             } else {
@@ -287,6 +290,17 @@ impl NetvscDevice {
             dev.nvsp_request_single_queue()?;
         }
 
+        // The RX path writes negotiated-MTU frames into a fixed-size
+        // PendingRx slot; refuse to boot rather than silently drop
+        // every RX packet if those don't fit (e.g. jumbo MTU host).
+        let max_eth = dev.mtu as usize + 14; // + ETH_HLEN
+        assert!(
+            max_eth <= RX_FRAME_MAX,
+            "NetVSC: negotiated MTU {} exceeds RX_FRAME_MAX {}",
+            dev.mtu,
+            RX_FRAME_MAX,
+        );
+
         info!(
             "NetVSC: ready, MAC={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, MTU={}",
             dev.mac[0], dev.mac[1], dev.mac[2], dev.mac[3], dev.mac[4], dev.mac[5], dev.mtu,
@@ -403,7 +417,13 @@ impl NetvscDevice {
                 }
                 Some(VmbusPacketType::Completion) => {
                     // TX completion — check if NVSP SEND_RNDIS_PKT_COMPLETE
-                    let nvsp_offset = (desc.offset8 as usize) * 8 - 16;
+                    let nvsp_offset = match (desc.offset8 as usize)
+                        .checked_mul(8)
+                        .and_then(|v| v.checked_sub(16))
+                    {
+                        Some(o) => o,
+                        None => continue,
+                    };
                     if nvsp_offset < raw_len && raw_len >= nvsp_offset + 4 {
                         let msg_type = u32::from_le_bytes(
                             raw[nvsp_offset..nvsp_offset + 4].try_into().unwrap(),
@@ -415,7 +435,13 @@ impl NetvscDevice {
                 }
                 Some(VmbusPacketType::DataInBand) => {
                     if raw_len >= 4 {
-                        let nvsp_offset = (desc.offset8 as usize) * 8 - 16;
+                        let nvsp_offset = match (desc.offset8 as usize)
+                            .checked_mul(8)
+                            .and_then(|v| v.checked_sub(16))
+                        {
+                            Some(o) => o,
+                            None => continue,
+                        };
                         if nvsp_offset < raw_len {
                             let nvsp_type = u32::from_le_bytes(
                                 raw[nvsp_offset..nvsp_offset + 4].try_into().unwrap(),
@@ -478,7 +504,7 @@ impl NetvscDevice {
                 self.ctrl_resp_ready = true;
             }
             // Keepalive → respond immediately
-            Some(RndisResponse::KeepAliveComplete { req_id, .. }) => {
+            Some(RndisResponse::KeepAlive { req_id }) => {
                 let mut resp = [0u8; 16];
                 let rlen = build_rndis_keepalive_cmplt(req_id, &mut resp);
                 let _ = self.send_rndis_control_inner(&resp[..rlen]);
@@ -731,9 +757,22 @@ impl NetvscDevice {
         self.channel.send(&nvsp_message_padded(&req), 0)?;
 
         let mut resp = [0u8; 256];
-        let (_desc, resp_len) = self
+        let (_desc, resp_len) = match self
             .channel
-            .recv_with_timeout(&mut resp, Duration::from_secs(2))?;
+            .recv_with_timeout(&mut resp, Duration::from_secs(2))
+        {
+            Ok(r) => r,
+            Err(HvError::Timeout) => {
+                // Without this completion, post-2026-05 Hyper-V hosts
+                // stall the RX path entirely. Surface loudly.
+                error!(
+                    "NetVSC: timeout waiting for SubChannelComplete \
+                     — host may withhold all subsequent RX traffic"
+                );
+                return Err(HvError::Timeout);
+            }
+            Err(e) => return Err(e),
+        };
 
         match parse_nvsp_response(&resp[..resp_len]) {
             Some(NvspResponse::SubChannelComplete {
@@ -747,7 +786,11 @@ impl NetvscDevice {
                 Ok(())
             }
             other => {
-                warn!("NetVSC: expected SubChannelComplete, got {:?}", other);
+                warn!(
+                    "NetVSC: expected SubChannelComplete, got {:?} \
+                     — host may withhold all subsequent RX traffic",
+                    other
+                );
                 // Don't fail boot — log and continue.
                 Ok(())
             }
@@ -889,8 +932,14 @@ impl NetvscDevice {
                     if self.pending_rx.is_some() {
                         return Ok(());
                     }
-                    let mut tmp = [0u8; RX_FRAME_MAX];
-                    let rndis_len = self.parse_xfer_page_packet(&raw[..raw_len], &mut tmp);
+                    // Parse straight into a fresh PendingRx (no double
+                    // memcpy: copy from recv buffer → PendingRx.data once,
+                    // then rewrite in place to extract the Ethernet frame).
+                    let mut rx = PendingRx {
+                        data: [0u8; RX_FRAME_MAX],
+                        len: 0,
+                    };
+                    let rndis_len = self.parse_xfer_page_packet(&raw[..raw_len], &mut rx.data);
 
                     // Always send completion so the host can release the
                     // recv-buffer slot, even if we end up dropping the
@@ -903,18 +952,17 @@ impl NetvscDevice {
                     let _ = self.channel.send_completion(&comp, desc.transaction_id);
 
                     if rndis_len >= RNDIS_HEADER_SIZE {
-                        let msg_type = u32::from_le_bytes(tmp[0..4].try_into().unwrap());
+                        let msg_type = u32::from_le_bytes(rx.data[0..4].try_into().unwrap());
                         if msg_type == RndisMessageType::Packet.as_u32() {
-                            // Extract Ethernet frame and queue it.
-                            if let Some(eth_len) = extract_eth_frame(&mut tmp, rndis_len) {
-                                let mut data = [0u8; RX_FRAME_MAX];
-                                data[..eth_len].copy_from_slice(&tmp[..eth_len]);
-                                self.pending_rx = Some(PendingRx { data, len: eth_len });
+                            // Extract Ethernet frame in place and queue it.
+                            if let Some(eth_len) = extract_eth_frame(&mut rx.data, rndis_len) {
+                                rx.len = eth_len;
+                                self.pending_rx = Some(rx);
                             }
                         } else if msg_type == RndisMessageType::KeepAlive.as_u32() {
                             // Host keepalive — answer inline.
-                            if let Some(RndisResponse::KeepAliveComplete { req_id, .. }) =
-                                parse_rndis_response(&tmp[..rndis_len])
+                            if let Some(RndisResponse::KeepAlive { req_id }) =
+                                parse_rndis_response(&rx.data[..rndis_len])
                             {
                                 let mut resp = [0u8; 16];
                                 let len = build_rndis_keepalive_cmplt(req_id, &mut resp);
@@ -926,7 +974,13 @@ impl NetvscDevice {
                 Some(VmbusPacketType::Completion) => {
                     // TX completion: free our send-buffer section if this
                     // is the SEND_RNDIS_PKT_COMPLETE for our outstanding TX.
-                    let nvsp_offset = (desc.offset8 as usize) * 8 - 16;
+                    let nvsp_offset = match (desc.offset8 as usize)
+                        .checked_mul(8)
+                        .and_then(|v| v.checked_sub(16))
+                    {
+                        Some(o) => o,
+                        None => continue,
+                    };
                     if nvsp_offset + 4 <= raw_len {
                         let msg_type = u32::from_le_bytes(
                             raw[nvsp_offset..nvsp_offset + 4].try_into().unwrap(),
@@ -948,7 +1002,15 @@ impl NetvscDevice {
     }
 
     /// Send an RNDIS control message (non-mutable version for keepalive responses).
+    ///
+    /// Refuses to write to send-buffer section 0 if a data-path TX is
+    /// still in flight there (`send_section_free == false`): doing so
+    /// would clobber the outgoing frame. Caller treats `Err(Timeout)`
+    /// as "try again later".
     fn send_rndis_control_inner(&self, rndis_msg: &[u8]) -> Result<(), HvError> {
+        if !self.send_section_free {
+            return Err(HvError::Timeout);
+        }
         let dst = self.send_buf.vaddr as *mut u8;
         unsafe {
             core::ptr::copy_nonoverlapping(rndis_msg.as_ptr(), dst, rndis_msg.len());
