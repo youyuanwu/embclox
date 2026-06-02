@@ -76,6 +76,15 @@ impl SynIC {
         self.siefp.vaddr
     }
 
+    /// Virtual address of the SIMP (SynIC Message Page).
+    ///
+    /// Published by [`crate::try_init`] to [`crate::isr::publish_simp`]
+    /// so the SINT2 ISR can peek the VMBus SINT slot's `message_type`
+    /// and wake [`crate::isr::SIMP_WAKER`] on host-queued messages.
+    pub fn simp_vaddr(&self) -> usize {
+        self.simp.vaddr
+    }
+
     /// Poll the SIMP for a message on the VMBus SINT slot.
     ///
     /// Returns the raw payload bytes if a message is present, or `None`.
@@ -186,7 +195,7 @@ where
 {
     type Output = Result<R, crate::HvError>;
 
-    fn poll(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // Drain whatever messages are visible right now. Each iteration
         // either matches (return Ready), or doesn't match (ack + look
         // for the next one). When the SIMP slot is empty, check the
@@ -218,6 +227,12 @@ where
                     // No match — loop and look for the next message.
                 }
                 None => {
+                    // Register on SIMP_WAKER BEFORE the deadline check
+                    // to close the wake/check race: if the host queues a
+                    // message between our poll_message() above and the
+                    // register() below, the ISR will wake us back into
+                    // poll() on the next IRQ.
+                    crate::isr::SIMP_WAKER.register(cx.waker());
                     if embassy_time::Instant::now() >= self.deadline {
                         return Poll::Ready(Err(crate::HvError::Timeout));
                     }

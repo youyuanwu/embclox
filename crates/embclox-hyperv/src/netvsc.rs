@@ -19,19 +19,10 @@ use crate::nvsp_types::{
 };
 use crate::HvError;
 use crate::VmBus;
-use embassy_sync::waitqueue::AtomicWaker;
 use embassy_time::{Duration, Instant};
 use embclox_dma::{DmaAllocator, DmaRegion};
 use embclox_hal_x86::memory::MemoryMapper;
 use log::*;
-
-/// Waker for the NetVSC data path. Signal this from the SynIC SINT2 ISR
-/// (or any other "channel may have new packets" event) to wake the
-/// embassy task driving the NIC.
-///
-/// Safe to call `.wake()` from interrupt context — `AtomicWaker` is
-/// designed for ISR → task notification.
-pub static NETVSC_WAKER: AtomicWaker = AtomicWaker::new();
 
 // Buffer sizes (our chosen allocation sizes, not protocol constants)
 const NETVSC_RECV_BUF_SIZE: usize = 2 * 1024 * 1024; // 2 MB
@@ -324,6 +315,19 @@ impl NetvscDevice {
         self.nvsp_version
     }
 
+    /// Per-channel waker for this device. Register on it (via
+    /// `register(cx.waker())`) from any future that wants to be woken
+    /// when the host signals our channel — typically the embassy
+    /// `Driver::receive` / `Driver::transmit` paths.
+    ///
+    /// Resolved via [`crate::isr::channel_waker`] using the channel's
+    /// `child_relid`, so the SINT2 ISR only kicks this waker when a
+    /// SIEFP bit for our channel was set — not on signals for other
+    /// VMBus devices.
+    pub fn waker(&self) -> &'static embassy_sync::waitqueue::AtomicWaker {
+        crate::isr::channel_waker(self.channel.child_relid)
+    }
+
     // ── NVSP version negotiation ────────────────────────────────────
 
     fn negotiate_nvsp_version(channel: &Channel) -> Result<u32, HvError> {
@@ -545,7 +549,10 @@ impl NetvscDevice {
                 error!("NetVSC: RNDIS response timeout");
                 return Err(HvError::Timeout);
             }
-            embassy_futures::yield_now().await;
+            // Sleep on the channel waker so SINT2 IRQs (host writes
+            // to our ring) wake us promptly. APIC timer ticks still
+            // wake us as a fallback for the deadline check.
+            self.wait_for_channel_event().await;
         }
     }
 
@@ -563,8 +570,27 @@ impl NetvscDevice {
                 error!("NetVSC: send section timeout");
                 return Err(HvError::Timeout);
             }
-            embassy_futures::yield_now().await;
+            self.wait_for_channel_event().await;
         }
+    }
+
+    /// One-shot future that registers on the per-channel waker and
+    /// returns once woken (or on first re-poll). Used by init-path
+    /// `_async` helpers above to sleep on `hlt` until the ISR signals
+    /// new ring activity, instead of busy-looping via `yield_now`.
+    async fn wait_for_channel_event(&self) {
+        let relid = self.channel.child_relid;
+        let mut polled_once = false;
+        core::future::poll_fn(|cx| {
+            if polled_once {
+                core::task::Poll::Ready(())
+            } else {
+                crate::isr::channel_waker(relid).register(cx.waker());
+                polled_once = true;
+                core::task::Poll::Pending
+            }
+        })
+        .await;
     }
 
     /// Parse a VM_PKT_DATA_USING_XFER_PAGES packet and copy RNDIS data from recv buffer.
@@ -816,7 +842,7 @@ impl NetvscDevice {
     ///
     /// Drains pending TX completions from the VMBus channel as a side
     /// effect — call this before checking; if it returns false the caller
-    /// should register a waker (see [`NETVSC_WAKER`]) and try again later.
+    /// should register a waker (see [`Self::waker`]) and try again later.
     pub fn has_tx_space(&mut self) -> bool {
         let _ = self.pump_channel();
         self.send_section_free
@@ -826,7 +852,7 @@ impl NetvscDevice {
     /// consumed via [`Self::recv_with`].
     ///
     /// Drains the VMBus channel as a side effect — when it returns false
-    /// the caller should register a waker (see [`NETVSC_WAKER`]) and try
+    /// the caller should register a waker (see [`Self::waker`]) and try
     /// again later.
     pub fn has_rx_packet(&mut self) -> bool {
         let _ = self.pump_channel();

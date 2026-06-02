@@ -477,7 +477,7 @@ struct WaitForPacket<'a, 'b> {
 impl<'a, 'b> Future for WaitForPacket<'a, 'b> {
     type Output = Result<(VmPacketDescriptor, usize), HvError>;
 
-    fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // Safety: WaitForPacket holds two non-overlapping borrows
         // (self.channel: &Channel, self.buf: &mut [u8]); we just need
         // to project them out without moving the pinned future.
@@ -485,6 +485,11 @@ impl<'a, 'b> Future for WaitForPacket<'a, 'b> {
         match this.channel.try_recv(this.buf) {
             Ok(Some(result)) => Poll::Ready(Ok(result)),
             Ok(None) => {
+                // Register our task on the per-channel waker BEFORE
+                // re-checking the deadline so the ISR can wake us
+                // between the empty-ring observation above and the
+                // Pending return below.
+                crate::isr::channel_waker(this.channel.child_relid).register(cx.waker());
                 if embassy_time::Instant::now() >= this.deadline {
                     Poll::Ready(Err(HvError::Timeout))
                 } else {

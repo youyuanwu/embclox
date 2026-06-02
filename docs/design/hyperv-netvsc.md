@@ -169,15 +169,6 @@ code doesn't have to rediscover them.
   this completion is required on post-2026-05 hosts to unblock RX,
   so a wrong response could still produce a silent no-RX boot.
 
-- **Init-path async helpers don't register `NETVSC_WAKER`.**
-  `recv_rndis_response_async` and `wait_for_send_section_async`
-  use `embassy_futures::yield_now()` only — no waker is registered
-  on [`NETVSC_WAKER`](../../crates/embclox-hyperv/src/netvsc.rs).
-  They depend on the 1 ms APIC tick to re-poll, so the SINT2 ISR
-  can't actually shorten the wait. Init still completes well
-  inside its 5 s timeouts, but the inconsistency with the data
-  path (which registers correctly) is worth tightening.
-
 ### Performance ceilings (intentional but worth surfacing)
 
 - **Single in-flight TX (`send_section_free: bool`).** All
@@ -221,25 +212,43 @@ path uses SIEFP, so the ISR must clear it.
 
 ### Implementation
 
-The SIEFP page address is published via:
+The SIEFP and SIMP page addresses are published via:
 
 1. [`SynIC::siefp_vaddr()`](../../crates/embclox-hyperv/src/synic.rs)
-   returns the kernel virtual address of the page.
-2. [`VmBus::siefp_vaddr()`](../../crates/embclox-hyperv/src/lib.rs)
-   (crate-internal) re-exports it through the public type.
-3. [`embclox_hyperv::try_init`](../../crates/embclox-hyperv/src/lib.rs)
+   and `SynIC::simp_vaddr()` return the kernel virtual addresses.
+2. [`embclox_hyperv::try_init`](../../crates/embclox-hyperv/src/lib.rs)
    installs `isr::vmbus_isr` at `msr::VMBUS_VECTOR` (= 34) and then
-   calls `isr::publish_siefp` so the ISR can read the address from a
-   `static SIEFP_VADDR: AtomicUsize` without a context.
+   calls `isr::publish_siefp` + `isr::publish_simp` so the ISR can
+   read both addresses from `static AtomicUsize`s without a context.
 
-[`isr::vmbus_isr`](../../crates/embclox-hyperv/src/isr.rs) walks the
-32 `u64` words of the SINT2 slot on every SINT2, zeroing any non-zero
-word with a volatile read/write pair, then wakes `NETVSC_WAKER`.
-Single-CPU + interrupt context means a non-atomic read-then-write is
-race-free (the host only sets bits; it doesn't clear bits we set).
+[`isr::vmbus_isr`](../../crates/embclox-hyperv/src/isr.rs) does two
+things per SINT2:
+
+1. **SIMP edge.** Peeks the `message_type: u32` at the start of the
+   VMBus SINT slot; if non-zero, wakes
+   [`isr::SIMP_WAKER`](../../crates/embclox-hyperv/src/isr.rs).
+   [`synic::wait_for_match`](../../crates/embclox-hyperv/src/synic.rs)
+   registers on `SIMP_WAKER` before returning `Pending`, so init-time
+   control-plane futures (version negotiation, GPADL creation,
+   channel open) sleep on `hlt` until the host actually responds
+   instead of polling on the 1 ms APIC tick fallback.
+2. **SIEFP scan.** Walks the 32 `u64` words of the SINT2 slot. For
+   each set bit, clears it (one volatile write per non-zero word)
+   and wakes
+   [`isr::channel_waker(relid)`](../../crates/embclox-hyperv/src/isr.rs)
+   — a `[AtomicWaker; 64]` indexed by `child_relid % 64`. Drivers
+   register on their own channel's waker via
+   `NetvscDevice::waker()`, so the ISR only wakes the embassy task
+   that actually has work pending instead of broadcasting one global
+   wake.
+
+Single-CPU + interrupt context means the non-atomic read-then-write
+of each SIEFP word is race-free (the host only sets bits; it doesn't
+clear bits we set).
 
 Examples just call `embclox_hyperv::try_init(&dma, &mut memory)?` —
-they never see the ISR, the SIEFP page, or `VMBUS_VECTOR` directly.
+they never see the ISR, the SIEFP/SIMP pages, `VMBUS_VECTOR`, or any
+of the waker tables directly.
 
 ### Symptom if missing
 
@@ -280,6 +289,64 @@ accepts both and they keep us on the well-trodden Linux path:
   RNDIS packet filter is set. Linux only sends this when multi-queue
   is requested; we send it unconditionally so the host has an
   explicit acknowledgement of our queue count.
+
+## Future direction: async-first channels
+
+The current model still has two layers between "host signals our
+ring" and "embassy task does work":
+
+1. ISR clears the SIEFP bit and wakes
+   [`isr::channel_waker(relid)`](../../crates/embclox-hyperv/src/isr.rs)
+   (one of 64 `AtomicWaker`s, keyed by `child_relid`).
+2. The embassy task wakes, the `Driver::receive` poll calls
+   `has_rx_packet()`, which calls `pump_channel()`, which drains
+   the ring synchronously.
+
+Mechanically this works — TCP echo verified on QEMU, local Hyper-V,
+and Azure — and matches the shape `embassy_net_driver::Driver` wants.
+But it means every NetVSC RX/TX is structured as "predicate +
+closure" plumbing (`has_rx_packet` / `recv_with`, `has_tx_space` /
+`transmit_with`) bolted onto a polling layer.
+
+For non-network synthetic devices (synthvid frame-ready, keyboard
+scancode arrived, mouse motion) the polling shape doesn't fit. The
+natural model is:
+
+```rust
+let mut framebuffer_evt = synthvid.frame_events();
+loop {
+    let frame = framebuffer_evt.next().await;  // direct async wait
+    composite(frame);
+}
+```
+
+Implementing this means giving `Channel` an `async fn next_packet()
+-> Packet` method that:
+
+- Tries `try_recv` once (drain whatever's already on the ring).
+- If empty, registers on `isr::channel_waker(self.child_relid)`,
+  returns `Poll::Pending`, waits for the ISR to wake it.
+- On wake, repeats.
+
+Most of the building blocks already exist: the per-channel waker
+table, the SIMP waker for init, the `WaitForPacket` future in
+[`channel.rs`](../../crates/embclox-hyperv/src/channel.rs) (which
+already registers on the channel waker today). The refactor would
+generalise `WaitForPacket` into a public stream, then expose typed
+wrappers per device — `Synthvid::frame_events() -> impl Stream<Item
+= FrameSlot>`, `Keyboard::scancodes() -> impl Stream<Item =
+Scancode>`. NetVSC stays on the embassy `Driver` adapter (it really
+does want a polling driver), but uses the same async-channel
+primitive underneath instead of the bespoke `pump_channel` loop.
+
+Scope: medium. Touches `channel.rs`, `netvsc.rs::pump_channel`, and
+any future device-driver module. Not blocking the TCP-echo scope.
+Worth doing when the second VMBus-driven device (synthvid most
+likely) gets an embassy task.
+
+Reference for the shape: Redox's per-channel callback registration
+(see [background doc](../background/hyperv-redox-drivers.md#lessons-we-could-apply)
+item 2) and Linux's `vmbus_open(..., onchannel_callback, ...)`.
 
 ## LAPIC timer ISR — implemented (shared runtime)
 

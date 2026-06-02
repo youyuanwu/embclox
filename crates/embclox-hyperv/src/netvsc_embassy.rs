@@ -1,14 +1,15 @@
 //! Embassy `Driver` adapter for the NetVSC synthetic NIC.
 //!
 //! Wraps [`crate::netvsc::NetvscDevice`] and implements
-//! [`embassy_net_driver::Driver`]. Wakes are delivered via the global
-//! [`crate::netvsc::NETVSC_WAKER`] which the SynIC SINT2 ISR signals on
-//! every channel event.
+//! [`embassy_net_driver::Driver`]. Wakes are delivered via the
+//! per-channel waker returned by [`NetvscDevice::waker`], which the
+//! SynIC SINT2 ISR ([`crate::isr::vmbus_isr`]) wakes on every SIEFP
+//! bit set for our channel.
 //!
 //! Mirrors the pattern in `crates/embclox-core/src/tulip_embassy.rs` —
-//! the only change is the underlying device and waker.
+//! the only change is the underlying device and the waker source.
 
-use crate::netvsc::{NetvscDevice, NETVSC_WAKER};
+use crate::netvsc::NetvscDevice;
 use core::cell::UnsafeCell;
 use core::task::Context;
 use embassy_net_driver::{Capabilities, HardwareAddress, LinkState};
@@ -16,9 +17,8 @@ use embassy_net_driver::{Capabilities, HardwareAddress, LinkState};
 /// Embassy network driver adapter for the Hyper-V synthetic NIC.
 ///
 /// # Safety
-/// Single-core only. The SynIC SINT2 ISR must only touch
-/// [`NETVSC_WAKER`] (which is `AtomicWaker` and ISR-safe), never the
-/// device itself.
+/// Single-core only. The SynIC SINT2 ISR must only touch the
+/// per-channel `AtomicWaker` (ISR-safe), never the device itself.
 pub struct NetvscEmbassy {
     device: UnsafeCell<NetvscDevice>,
     mac: [u8; 6],
@@ -60,20 +60,21 @@ impl embassy_net_driver::Driver for NetvscEmbassy {
         if dev.has_rx_packet() && dev.has_tx_space() {
             return Some((RxToken { parent: self }, TxToken { parent: self }));
         }
-        NETVSC_WAKER.register(cx.waker());
+        dev.waker().register(cx.waker());
         None
     }
 
     fn transmit(&mut self, cx: &mut Context) -> Option<Self::TxToken<'_>> {
-        if self.dev_mut().has_tx_space() {
+        let dev = self.dev_mut();
+        if dev.has_tx_space() {
             return Some(TxToken { parent: self });
         }
-        NETVSC_WAKER.register(cx.waker());
+        dev.waker().register(cx.waker());
         None
     }
 
     fn link_state(&mut self, cx: &mut Context) -> LinkState {
-        NETVSC_WAKER.register(cx.waker());
+        self.dev_mut().waker().register(cx.waker());
         // We don't track real link state from the host; once NetVSC init
         // succeeded the link is treated as up. NDIS_INDICATE_STATUS would
         // be the proper signal if/when we wire it up.

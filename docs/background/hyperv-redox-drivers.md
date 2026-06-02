@@ -331,12 +331,17 @@ In rough order of ROI to embclox:
    (which already exists but is unused by NetVSC). Could go
    alongside the [single in-flight TX][known-issues] known issue.
 
-2. **Per-channel waiter table.** Replacing `NETVSC_WAKER:
-   AtomicWaker` with a small `HashMap<u32, AtomicWaker>` (or a
-   fixed-size array keyed by SIEFP bit) would let the
-   [SIEFP-clearing ISR](../design/hyperv-netvsc.md#siefp-event-flag-clearing--required-for-hostguest-rx)
-   wake only the relevant device task instead of broadcasting. Not
-   urgent while we run one synthetic NIC at a time.
+2. ~~Per-channel waiter table.~~ **Done.** The previous
+   `NETVSC_WAKER: AtomicWaker` global has been replaced with a
+   `[AtomicWaker; 64]` indexed by `child_relid % 64` in
+   [`crates/embclox-hyperv/src/isr.rs`](../../crates/embclox-hyperv/src/isr.rs).
+   The [SIEFP-clearing
+   ISR](../design/hyperv-netvsc.md#siefp-event-flag-clearing--required-for-host→guest-rx)
+   wakes only the relevant device task. A second waker
+   ([`isr::SIMP_WAKER`](../../crates/embclox-hyperv/src/isr.rs)) is
+   woken on SIMP message arrivals so init-path control futures
+   sleep on `hlt` until the host responds instead of polling on
+   the 1 ms APIC tick.
 
 3. **Async `create_gpadl`.** Our current `channel::create_gpadl`
    uses a `recv_with_timeout` spin loop driven by `block_on_hlt`

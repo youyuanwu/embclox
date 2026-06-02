@@ -6,7 +6,7 @@ use crate::nic::EmbcloxNic;
 use alloc::boxed::Box;
 use core::task::{Context, Waker};
 use embassy_net_driver::{Capabilities, HardwareAddress, LinkState};
-use embclox_hyperv::netvsc::{NetvscDevice, NETVSC_WAKER};
+use embclox_hyperv::netvsc::NetvscDevice;
 use embclox_hyperv::{guid, ChannelOffer};
 
 pub struct NetvscDriver;
@@ -69,7 +69,7 @@ impl EmbcloxNic for NicNetvsc {
         self.device.has_tx_space()
     }
     fn register_waker(&mut self, waker: &Waker) {
-        NETVSC_WAKER.register(waker);
+        self.device.waker().register(waker);
     }
     fn recv_with(&mut self, f: &mut dyn FnMut(&mut [u8])) {
         self.device

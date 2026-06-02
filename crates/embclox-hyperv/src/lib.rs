@@ -239,6 +239,7 @@ pub fn try_init(
 
     let vmbus = init(dma, memory)?;
     isr::publish_siefp(vmbus.siefp_vaddr());
+    isr::publish_simp(vmbus.synic.simp_vaddr());
     log::info!(
         "VMBus: version={:#x}, {} offers",
         vmbus.version(),
