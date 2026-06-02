@@ -21,24 +21,31 @@ Generic over `embclox_dma::DmaAllocator` and
 ## API surface
 
 ```rust
-let mut vmbus = embclox_hyperv::init(&dma, &mut memory)?;
-for offer in vmbus.offers() { ... }
+// One-shot: detect Hyper-V, install SINT2 ISR, init VMBus.
+// Returns Ok(None) on non-Hyper-V platforms (non-fatal).
+let mut vmbus = embclox_hyperv::try_init(&dma, &mut memory)?;
+if let Some(vmbus) = vmbus.as_mut() {
+    for offer in vmbus.offers() { ... }
 
-let netvsc = embclox_hyperv::netvsc::NetvscDevice::init(
-    &mut vmbus, &dma, &memory)?;
+    let netvsc = embclox_hyperv::netvsc::NetvscDevice::init(
+        vmbus, &dma, &memory)?;
 
-// Hand to embassy:
-let driver = embclox_hyperv::netvsc_embassy::NetvscEmbassy::new(netvsc);
-let (stack, runner) = embassy_net::new(driver, config, resources, seed);
+    // Hand to embassy:
+    let driver = embclox_hyperv::netvsc_embassy::NetvscEmbassy::new(netvsc);
+    let (stack, runner) = embassy_net::new(driver, config, resources, seed);
+}
 ```
 
 Caller is responsible for:
 - Mapping the LAPIC + starting the APIC periodic timer
-  (`embclox_hal_x86::runtime::start_apic_timer`)
-- Installing `vmbus_isr` at `msr::VMBUS_VECTOR` (= 34) **before**
-  `embclox_hyperv::init` runs — the SINT2 IRQ is what wakes the
-  internal `block_on_hlt` runner from `hlt` while waiting for host
-  responses
+  (`embclox_hal_x86::runtime::start_apic_timer`) **before**
+  `try_init` so the SINT2 IRQ delivered during init can wake the
+  internal `block_on_hlt` runner from `hlt`.
+- Reserving IDT vector `msr::VMBUS_VECTOR` (= 34) in any vector
+  allocator. `try_init` installs the ISR itself.
+
+For a lower-level `init` that skips the detect + ISR-install
+plumbing, call `embclox_hyperv::init` directly.
 
 See `examples-kernel/src/main.rs` for the canonical setup order.
 

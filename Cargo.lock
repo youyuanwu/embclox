@@ -336,6 +336,7 @@ dependencies = [
  "embclox-dma",
  "embclox-hal-x86",
  "log",
+ "x86_64",
 ]
 
 [[package]]

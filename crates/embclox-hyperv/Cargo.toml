@@ -12,6 +12,7 @@ embassy-net-driver.workspace = true
 embassy-sync.workspace = true
 embassy-time.workspace = true
 log.workspace = true
+x86_64.workspace = true
 
 [build-dependencies]
 bindgen.workspace = true

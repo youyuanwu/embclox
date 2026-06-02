@@ -5,6 +5,7 @@
 //! `detect()` returns `None` on QEMU or bare metal.
 
 #![no_std]
+#![feature(abi_x86_interrupt)]
 
 extern crate alloc;
 
@@ -16,6 +17,7 @@ pub mod channel;
 pub mod detect;
 pub mod guid;
 pub mod hypercall;
+pub mod isr;
 pub mod msr;
 pub mod netvsc;
 pub mod netvsc_embassy;
@@ -129,9 +131,10 @@ impl VmBus {
 
     /// Virtual address of the SIEFP page (SynIC Event Flags).
     ///
-    /// Exposed so the example's SINT2 ISR can scan and clear per-channel
-    /// event flags. See [`synic::SynIC::siefp_vaddr`] for layout.
-    pub fn siefp_vaddr(&self) -> usize {
+    /// Internal accessor for [`try_init`] to wire up the SINT2 ISR.
+    /// The ISR itself lives in [`isr`] and reaches the SIEFP through
+    /// a published static — callers should not need this directly.
+    pub(crate) fn siefp_vaddr(&self) -> usize {
         self.synic.siefp_vaddr()
     }
 }
@@ -188,4 +191,58 @@ pub fn init(dma: &impl DmaAllocator, memory: &mut MemoryMapper) -> Result<VmBus,
         _monitor_child_to_parent: monitor2,
         _monitor_parent_to_child: monitor1,
     })
+}
+
+/// Detect Hyper-V, install the SINT2 ISR, and initialise VMBus in one
+/// call. Encapsulates the full "running on Hyper-V?" flow so example
+/// kernels don't need to know about the SIEFP page, the SINT2 vector,
+/// or the ordering constraint between ISR install and [`init`].
+///
+/// - `Ok(Some(vmbus))` — running on Hyper-V, VMBus is up, ISR is
+///   wired, SIEFP address has been published to the ISR.
+/// - `Ok(None)` — not running on Hyper-V (CPUID negative, or SynIC /
+///   hypercall MSR unavailable). Non-fatal; the caller should
+///   continue with PCI-only paths.
+/// - `Err(_)` — Hyper-V detected but [`init`] failed. Caller decides
+///   whether to abort or fall back.
+///
+/// The ISR is installed *before* [`init`] so the host's first
+/// `INITIATE_CONTACT` response (delivered via SINT2) can wake the
+/// synchronous boot loop.
+pub fn try_init(
+    dma: &impl DmaAllocator,
+    memory: &mut MemoryMapper,
+) -> Result<Option<VmBus>, HvError> {
+    let features = match detect::detect() {
+        Some(f) if f.has_synic && f.has_hypercall => f,
+        Some(_) => {
+            log::info!("Hyper-V detected but missing SynIC/hypercall; skipping VMBus");
+            return Ok(None);
+        }
+        None => {
+            log::info!("Hyper-V not detected; skipping VMBus");
+            return Ok(None);
+        }
+    };
+    let _ = features;
+
+    log::info!("Hyper-V: SynIC + hypercall present, initialising VMBus");
+    // Install SINT2 ISR BEFORE init: the host's first INITIATE_CONTACT
+    // response delivers via SINT2.
+    //
+    // SAFETY: msr::VMBUS_VECTOR (= 34) is reserved by the example's
+    // VectorAllocator; installing into the shared IDT is single-CPU
+    // and happens once during boot.
+    unsafe {
+        embclox_hal_x86::idt::set_handler(msr::VMBUS_VECTOR, isr::vmbus_isr);
+    }
+
+    let vmbus = init(dma, memory)?;
+    isr::publish_siefp(vmbus.siefp_vaddr());
+    log::info!(
+        "VMBus: version={:#x}, {} offers",
+        vmbus.version(),
+        vmbus.offers().len()
+    );
+    Ok(Some(vmbus))
 }

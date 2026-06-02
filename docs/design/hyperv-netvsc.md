@@ -13,7 +13,7 @@ VMBus channel: `F8615163-DF3E-46C5-913F-F2D2F965ED0E`
 | NVSP — version negotiation, recv/send buffer GPADLs | `crates/embclox-hyperv/src/netvsc.rs` | NVSP v6.1 negotiated on local Hyper-V Gen1 + Azure Gen1 |
 | RNDIS — init, MAC/MTU query, packet filter | `crates/embclox-hyperv/src/{nvsp_msg.rs,nvsp_types.rs}` | RNDIS v1.0, MAC/MTU read back on both |
 | RNDIS_PACKET_MSG TX/RX | `netvsc.rs::transmit_with` / `recv_with` | Gratuitous ARP + DHCP DISCOVER → reply received |
-| SynIC SINT2 → AtomicWaker, with SIEFP event-flag clear | `examples-kernel/src/main.rs::vmbus_isr` + `netvsc::NETVSC_WAKER` | TCP echo on local Hyper-V + Azure (see [SIEFP event-flag clearing](#siefp-event-flag-clearing--required-for-host→guest-rx)) |
+| SynIC SINT2 → AtomicWaker, with SIEFP event-flag clear | `embclox_hyperv::isr::vmbus_isr` + `netvsc::NETVSC_WAKER` | TCP echo on local Hyper-V + Azure (see [SIEFP event-flag clearing](#siefp-event-flag-clearing--required-for-host→guest-rx)) |
 | `embassy_net_driver::Driver` impl | `crates/embclox-hyperv/src/netvsc_embassy.rs` | TCP echo @ port 1234 verified locally + on Azure |
 | Cmdline-driven DHCP/static selection | `embclox_hal_x86::cmdline` + `examples-kernel/limine{,-hyperv,-azure}.conf` | Both modes parse correctly |
 | Azure Gen1 deployment | `tests/infra/{storage,vm}.bicep` + `cmake --build build --target kernel-vhd` | TCP echo from public Internet to bare-metal kernel: `echo X \| nc <public-ip> 1234` returns `X` |
@@ -221,23 +221,25 @@ path uses SIEFP, so the ISR must clear it.
 
 ### Implementation
 
-The SIEFP page address is published to the example's ISR via:
+The SIEFP page address is published via:
 
 1. [`SynIC::siefp_vaddr()`](../../crates/embclox-hyperv/src/synic.rs)
    returns the kernel virtual address of the page.
 2. [`VmBus::siefp_vaddr()`](../../crates/embclox-hyperv/src/lib.rs)
-   re-exports it through the public type.
-3. After `embclox_hyperv::init` succeeds, the example stores it in
-   a `static SIEFP_VADDR: AtomicUsize` so the SINT2 ISR can read it
-   without a context.
+   (crate-internal) re-exports it through the public type.
+3. [`embclox_hyperv::try_init`](../../crates/embclox-hyperv/src/lib.rs)
+   installs `isr::vmbus_isr` at `msr::VMBUS_VECTOR` (= 34) and then
+   calls `isr::publish_siefp` so the ISR can read the address from a
+   `static SIEFP_VADDR: AtomicUsize` without a context.
 
-`vmbus_isr` in
-[`examples-kernel/src/main.rs`](../../examples-kernel/src/main.rs)
-walks the 32 `u64` words of the SINT2 slot on every SINT2, zeroing
-any non-zero word with a volatile read/write pair, then wakes
-`NETVSC_WAKER`. Single-CPU + interrupt context means a non-atomic
-read-then-write is race-free (the host only sets bits; it doesn't
-clear bits we set).
+[`isr::vmbus_isr`](../../crates/embclox-hyperv/src/isr.rs) walks the
+32 `u64` words of the SINT2 slot on every SINT2, zeroing any non-zero
+word with a volatile read/write pair, then wakes `NETVSC_WAKER`.
+Single-CPU + interrupt context means a non-atomic read-then-write is
+race-free (the host only sets bits; it doesn't clear bits we set).
+
+Examples just call `embclox_hyperv::try_init(&dma, &mut memory)?` —
+they never see the ISR, the SIEFP page, or `VMBUS_VECTOR` directly.
 
 ### Symptom if missing
 

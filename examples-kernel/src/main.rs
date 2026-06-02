@@ -6,12 +6,10 @@
 
 #![no_std]
 #![no_main]
-#![feature(abi_x86_interrupt)]
 
 extern crate alloc;
 
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicUsize, Ordering};
 use embassy_net::{Stack, StackResources};
 use embclox_core::dma_alloc::BootDmaAllocator;
 use embclox_driver::{
@@ -23,37 +21,8 @@ use embclox_hal_x86::vector_alloc::VectorAllocator;
 use embedded_io_async::Write as AsyncWrite;
 use log::*;
 use static_cell::StaticCell;
-use x86_64::structures::idt::InterruptStackFrame;
 
 embclox_hal_x86::limine_boot_requests!(limine_boot);
-
-// ---------- SINT2 ISR (only used on Hyper-V) ---------------------------
-
-/// SIEFP virtual address, published after `embclox_hyperv::init` so the
-/// SINT2 ISR can clear per-channel event flags.
-static SIEFP_VADDR: AtomicUsize = AtomicUsize::new(0);
-
-/// SynIC SINT2 → VMBus handler: clear the
-/// event-flag bits the host set, wake `NETVSC_WAKER`. SINT MSR is
-/// configured auto-EOI, so no LAPIC EOI here.
-extern "x86-interrupt" fn vmbus_isr(_frame: InterruptStackFrame) {
-    let siefp = SIEFP_VADDR.load(Ordering::Relaxed);
-    if siefp != 0 {
-        let slot = (siefp + (embclox_hyperv::msr::VMBUS_SINT as usize) * 256) as *mut u64;
-        for i in 0..32usize {
-            // SAFETY: SIEFP is a 4 KiB DMA page we own; SINT2 slot is in
-            // bounds. Volatile to observe host writes.
-            unsafe {
-                let p = slot.add(i);
-                let w = core::ptr::read_volatile(p);
-                if w != 0 {
-                    core::ptr::write_volatile(p, 0);
-                }
-            }
-        }
-    }
-    embclox_hyperv::netvsc::NETVSC_WAKER.wake();
-}
 
 // ---------- Network config ---------------------------------------------
 
@@ -123,33 +92,17 @@ unsafe extern "C" fn kmain() -> ! {
         phys_offset: p.memory.phys_offset(),
     };
 
-    let hv_features = embclox_hyperv::detect::detect();
-    let is_hyperv = matches!(&hv_features, Some(f) if f.has_synic && f.has_hypercall);
-
-    let mut vmbus_holder: Option<embclox_hyperv::VmBus> = None;
+    let mut vmbus_holder = match embclox_hyperv::try_init(&dma, &mut p.memory) {
+        Ok(opt) => opt,
+        Err(e) => {
+            warn!("VMBus init failed: {} (continuing without VMBus)", e);
+            None
+        }
+    };
+    let is_hyperv = vmbus_holder.is_some();
     if is_hyperv {
-        info!("Hyper-V: SynIC + hypercall present, initialising VMBus");
-        // Install SINT2 ISR BEFORE VmBus::init so the host's first
-        // INITIATE_CONTACT response can wake the synchronous boot loop.
-        unsafe {
-            embclox_hal_x86::idt::set_handler(embclox_hyperv::msr::VMBUS_VECTOR, vmbus_isr);
-        }
-        match embclox_hyperv::init(&dma, &mut p.memory) {
-            Ok(vmbus) => {
-                SIEFP_VADDR.store(vmbus.siefp_vaddr(), Ordering::Release);
-                info!(
-                    "VMBus: version={:#x}, {} offers",
-                    vmbus.version(),
-                    vmbus.offers().len()
-                );
-                // Marker for scripts/hyperv-boot-test.ps1.
-                info!("VMBUS INIT PASSED");
-                vmbus_holder = Some(vmbus);
-            }
-            Err(e) => warn!("VMBus init failed: {} (continuing without VMBus)", e),
-        }
-    } else {
-        info!("Hyper-V not detected; PCI-only boot path");
+        // Marker for scripts/hyperv-boot-test.ps1.
+        info!("VMBUS INIT PASSED");
     }
 
     // --- Driver registry + probe loop ----------------------------------
