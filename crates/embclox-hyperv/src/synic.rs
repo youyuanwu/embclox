@@ -153,21 +153,31 @@ use core::task::{Context, Poll};
 /// # Important: matcher contract
 ///
 /// Every message visible in the SIMP slot is passed to `matcher`
-/// **exactly once** and then **acked unconditionally** — including
-/// when `matcher` returns `None`. Acking clears the SIMP slot and
-/// (if `MessagePending` is set) signals `EOM` so the host delivers
-/// the next queued message; the discarded message is gone forever.
+/// **exactly once** and then **acked unconditionally**. Acking
+/// clears the SIMP slot and (if `MessagePending` is set) signals
+/// `EOM` so the host delivers the next queued message — the
+/// in-slot bytes are gone after the matcher returns.
 ///
-/// In practice this is safe because VMBus init is request/response
-/// sequenced — the host shouldn't send unrelated messages mid-step,
-/// and the SIMP only has one slot per SINT. But a `matcher` that
-/// expects to see *several* message types in one wait (e.g. the
-/// `request_offers` pattern of OFFERCHANNEL × N + ALLOFFERS_DELIVERED)
-/// must recognise every type it cares about: returning `None` for a
-/// message you actually wanted to keep is a silent data loss bug.
+/// The matcher controls the meaning of returning `None`:
+///
+/// - **Collect-and-continue pattern**: matcher consumes the payload
+///   via a side effect (typically copying into a captured `Vec`)
+///   and returns `None` to keep waiting for the next message. The
+///   collected data outlives the ack. `request_offers_async` uses
+///   this to gather N `OFFERCHANNEL` payloads before `Some(())` on
+///   `ALLOFFERS_DELIVERED`.
+/// - **Discard-and-continue pattern**: matcher genuinely doesn't
+///   recognise the message type; returns `None` and the bytes are
+///   lost. Today only used for unexpected message types on init
+///   paths where loss is benign.
+///
+/// A matcher that needs to keep payload bytes **must** copy them
+/// before returning `None`. The matcher is the only authority on
+/// what "matched" means — returning `None` for a message you
+/// actually wanted to keep is a silent data-loss bug.
 ///
 /// Discarded messages are logged at `trace!` level so unexpected
-/// messages can be diagnosed without flooding logs.
+/// host traffic can be diagnosed without flooding logs.
 pub fn wait_for_match<'a, F, R>(
     synic: &'a SynIC,
     deadline: embassy_time::Instant,
@@ -227,12 +237,21 @@ where
                     // No match — loop and look for the next message.
                 }
                 None => {
-                    // Register on SIMP_WAKER BEFORE the deadline check
-                    // to close the wake/check race: if the host queues a
-                    // message between our poll_message() above and the
-                    // register() below, the ISR will wake us back into
-                    // poll() on the next IRQ.
+                    // Register on SIMP_WAKER BEFORE re-checking the
+                    // slot to close the wake/check race: if the host
+                    // queues a message between the poll_message() above
+                    // and the register() here, the ISR wake would be
+                    // lost (no one is registered yet) and we'd sleep
+                    // until the deadline. After registering, re-poll
+                    // once — if the host raced us we observe the
+                    // message now; otherwise the registration ensures
+                    // any future wake reaches us.
                     crate::isr::SIMP_WAKER.register(cx.waker());
+                    if self.synic.poll_message().is_some() {
+                        // Loop back to the matched arm; do not
+                        // duplicate the matcher logic here.
+                        continue;
+                    }
                     if embassy_time::Instant::now() >= self.deadline {
                         return Poll::Ready(Err(crate::HvError::Timeout));
                     }

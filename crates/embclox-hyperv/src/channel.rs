@@ -485,11 +485,20 @@ impl<'a, 'b> Future for WaitForPacket<'a, 'b> {
         match this.channel.try_recv(this.buf) {
             Ok(Some(result)) => Poll::Ready(Ok(result)),
             Ok(None) => {
-                // Register our task on the per-channel waker BEFORE
-                // re-checking the deadline so the ISR can wake us
-                // between the empty-ring observation above and the
-                // Pending return below.
+                // Register on the per-channel waker BEFORE re-checking
+                // the ring to close the wake/check race: if the host
+                // writes a packet between the try_recv() above and the
+                // register() here, the ISR wake would be lost (no one
+                // is registered yet) and we'd sleep until the deadline.
+                // After registering, re-poll once — if the host raced
+                // us we observe the packet now; otherwise the
+                // registration ensures any future wake reaches us.
                 crate::isr::channel_waker(this.channel.child_relid).register(cx.waker());
+                match this.channel.try_recv(this.buf) {
+                    Ok(Some(result)) => return Poll::Ready(Ok(result)),
+                    Ok(None) => {}
+                    Err(e) => return Poll::Ready(Err(e)),
+                }
                 if embassy_time::Instant::now() >= this.deadline {
                     Poll::Ready(Err(HvError::Timeout))
                 } else {
