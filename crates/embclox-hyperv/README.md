@@ -15,7 +15,6 @@ Generic over `embclox_dma::DmaAllocator` and
 | `channel` | GPADL alloc, OPENCHANNEL, ring-buffer send/recv, `WaitForPacket` future |
 | `netvsc` | NVSP version negotiation + recv/send buffer GPADLs |
 | `netvsc` (RNDIS) | RNDIS_INITIALIZE + MAC/MTU OID queries + packet filter |
-| `netvsc_embassy` | `embassy_net_driver::Driver` impl wrapping `NetvscDevice` |
 | `synthvid` | Synthetic graphics device (currently unused) |
 
 ## API surface
@@ -29,12 +28,15 @@ if let Some(vmbus) = vmbus.as_mut() {
 
     let netvsc = embclox_hyperv::netvsc::NetvscDevice::init(
         vmbus, &dma, &memory)?;
-
-    // Hand to embassy:
-    let driver = embclox_hyperv::netvsc_embassy::NetvscEmbassy::new(netvsc);
-    let (stack, runner) = embassy_net::new(driver, config, resources, seed);
+    // netvsc.waker() yields the per-channel AtomicWaker for embassy
+    // tasks driving this NIC.
 }
 ```
+
+For an `embassy_net_driver::Driver` impl + the canonical IRQ /
+registry wiring, see
+`crates/embclox-driver/src/drivers/netvsc.rs` (used by
+`examples-kernel`).
 
 Caller is responsible for:
 - Mapping the LAPIC + starting the APIC periodic timer

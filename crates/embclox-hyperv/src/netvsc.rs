@@ -834,9 +834,10 @@ impl NetvscDevice {
     //
     // The public API exposes two predicate methods (`has_tx_space`,
     // `has_rx_packet`) and two closure-based operations (`transmit_with`,
-    // `recv_with`). This matches the shape used by `tulip_embassy.rs` and
-    // lets `embassy_net_driver::Driver` plug in directly without any
-    // additional spinning.
+    // `recv_with`). This matches the shape used by `NicTulip` /
+    // `NicE1000` in `embclox-driver/src/drivers/` and lets the
+    // `embassy_net_driver::Driver` wrapper there plug in directly
+    // without any additional spinning.
 
     /// Returns true if there's room in the send buffer for another TX.
     ///

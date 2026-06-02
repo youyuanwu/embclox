@@ -20,7 +20,6 @@ pub mod hypercall;
 pub mod isr;
 pub mod msr;
 pub mod netvsc;
-pub mod netvsc_embassy;
 pub mod ring;
 pub mod synic;
 pub mod synthvid;

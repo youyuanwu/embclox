@@ -326,7 +326,6 @@ version = "0.1.0"
 dependencies = [
  "bindgen",
  "embassy-futures",
- "embassy-net-driver",
  "embassy-sync",
  "embassy-time",
  "embclox-async",

@@ -8,7 +8,6 @@ embassy-futures.workspace = true
 embclox-async.workspace = true
 embclox-dma.workspace = true
 embclox-hal-x86.workspace = true
-embassy-net-driver.workspace = true
 embassy-sync.workspace = true
 embassy-time.workspace = true
 log.workspace = true
