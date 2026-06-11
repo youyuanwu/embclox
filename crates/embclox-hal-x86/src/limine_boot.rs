@@ -74,13 +74,18 @@ pub struct LimineBootInfo<'a> {
 /// - `MemoryMapRequest` — physical memory map (re-exported for callers)
 /// - `FramebufferRequest` — graphics framebuffer (re-exported for callers)
 /// - `StackSizeRequest` — request 64 KiB stack (matches existing examples)
+/// - `MpRequest` — application-processor bring-up. The response
+///   pointer is exposed via `<mod>::mp_response()`; the SMP code
+///   path (phase 3) reads it when the kernel opts in via cmdline.
+///   Without an explicit caller the APs sit in Limine's spin loop
+///   and the request is harmless.
 #[macro_export]
 macro_rules! limine_boot_requests {
     ($mod_name:ident) => {
         mod $mod_name {
             use $crate::limine_boot::limine::request::{
                 ExecutableAddressRequest, ExecutableCmdlineRequest, FramebufferRequest,
-                HhdmRequest, MemoryMapRequest, RequestsEndMarker, RequestsStartMarker,
+                HhdmRequest, MemoryMapRequest, MpRequest, RequestsEndMarker, RequestsStartMarker,
                 StackSizeRequest,
             };
             use $crate::limine_boot::limine::BaseRevision;
@@ -121,6 +126,22 @@ macro_rules! limine_boot_requests {
             #[unsafe(link_section = ".requests")]
             static STACK_SIZE_REQUEST: StackSizeRequest =
                 StackSizeRequest::new().with_size(64 * 1024);
+
+            #[used]
+            #[unsafe(link_section = ".requests")]
+            pub static MP_REQUEST: MpRequest = MpRequest::new();
+
+            /// Read the Limine MP response, if the bootloader provided
+            /// one. Returns `None` on firmware that doesn't honour the
+            /// `MpRequest` (some early UEFI bootloaders).
+            ///
+            /// Phase 3 of the SMP work (`bring_up_aps`) consumes this.
+            /// Until then the response is unused; APs stay in Limine's
+            /// spin loop.
+            pub fn mp_response(
+            ) -> Option<&'static $crate::limine_boot::limine::response::MpResponse> {
+                MP_REQUEST.get_response()
+            }
 
             /// Read the Limine responses and build a [`LimineBootInfo`].
             ///
