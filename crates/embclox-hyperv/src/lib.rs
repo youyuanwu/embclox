@@ -237,8 +237,14 @@ pub fn try_init(
     }
 
     let vmbus = init(dma, memory)?;
-    isr::publish_siefp(vmbus.siefp_vaddr());
-    isr::publish_simp(vmbus.synic.simp_vaddr());
+    // Today SynIC is BSP-only: try_init runs on the BSP and writes
+    // BSP's SCONTROL/SIMP/SIEFP MSRs. AP-side SynIC bring-up is
+    // future work (NetVSC subchannels per CPU); when it lands, each
+    // AP calls publish_siefp/publish_simp with its own CpuId from
+    // inside its startup path.
+    use embclox_hal_x86::vector_alloc::CpuId;
+    isr::publish_siefp(CpuId::Bsp, vmbus.siefp_vaddr());
+    isr::publish_simp(CpuId::Bsp, vmbus.synic.simp_vaddr());
     log::info!(
         "VMBus: version={:#x}, {} offers",
         vmbus.version(),

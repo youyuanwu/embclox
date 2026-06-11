@@ -2,10 +2,23 @@
 //!
 //! The SINT2 ISR has signature `extern "x86-interrupt" fn(InterruptStackFrame)`
 //! — no context — so the SIMP / SIEFP page addresses are published into
-//! statics by [`crate::try_init`] for the ISR to read. See
-//! [`docs/design/hyperv-netvsc.md`](../../../docs/design/hyperv-netvsc.md)
+//! per-CPU statics by [`crate::try_init`] (for the BSP) for the ISR
+//! to read. See [`docs/design/hyperv-netvsc.md`](../../../docs/design/hyperv-netvsc.md)
 //! for the rationale (post-init data path requires per-channel SIEFP
 //! bit clearing or the host stops re-raising SINT2).
+//!
+//! ## SMP shape
+//!
+//! Hyper-V's SynIC is per-vCPU: each CPU has its own SCONTROL / SIMP
+//! / SIEFP / SINTx MSRs, and SINT2 fires on whichever vCPU's SynIC
+//! raised it. The SIMP / SIEFP page addresses are therefore stored
+//! as `[AtomicUsize; MAX_CPUS]` arrays; the ISR reads
+//! [`embclox_hal_x86::cpu_local::current_cpu_id`] to pick its slot.
+//!
+//! Today only the BSP's slot is populated (by [`crate::try_init`]).
+//! When AP-side SynIC bring-up lands, each AP will populate its own
+//! slot via [`publish_siefp`] / [`publish_simp`]; the ISR keeps
+//! working unchanged.
 //!
 //! ## Wakers
 //!
@@ -25,13 +38,24 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use embassy_sync::waitqueue::AtomicWaker;
+use embclox_hal_x86::cpu_local::{self, MAX_CPUS};
+use embclox_hal_x86::vector_alloc::CpuId;
 use x86_64::structures::idt::InterruptStackFrame;
 
-/// SIEFP page virtual address, populated by [`crate::try_init`].
-static SIEFP_VADDR: AtomicUsize = AtomicUsize::new(0);
+/// Per-CPU SIEFP page virtual addresses, populated by
+/// [`publish_siefp`]. Index = `processor_id` (BSP = 0).
+static SIEFP_VADDR: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(0) }; MAX_CPUS];
 
-/// SIMP page virtual address, populated by [`crate::try_init`].
-static SIMP_VADDR: AtomicUsize = AtomicUsize::new(0);
+/// Per-CPU SIMP page virtual addresses, populated by
+/// [`publish_simp`]. Index = `processor_id` (BSP = 0).
+static SIMP_VADDR: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(0) }; MAX_CPUS];
+
+fn slot_of(cpu: CpuId) -> usize {
+    match cpu {
+        CpuId::Bsp => 0,
+        CpuId::Ap(n) => n as usize,
+    }
+}
 
 /// Waker for SIMP message arrivals on the VMBus SINT slot.
 ///
@@ -73,6 +97,10 @@ pub fn channel_waker(relid: u32) -> &'static AtomicWaker {
 
 /// SynIC SINT2 → VMBus handler.
 ///
+/// Runs in the context of whichever vCPU's SynIC raised SINT2.
+/// Reads `cpu_local::current_cpu_id()` to find that CPU's SIMP /
+/// SIEFP slots.
+///
 /// 1. If a SIMP message is queued on the VMBus SINT slot, wake
 ///    [`SIMP_WAKER`].
 /// 2. Walk the 32-word SIEFP SINT2 slot. For every set bit, clear
@@ -81,14 +109,15 @@ pub fn channel_waker(relid: u32) -> &'static AtomicWaker {
 /// SINT MSR is configured auto-EOI in [`crate::synic::SynIC::new`], so
 /// no LAPIC EOI is needed.
 ///
-/// Single-CPU, interrupt-context: the read-modify-write of each SIEFP
-/// word is race-free because the host only ever sets bits we haven't
-/// cleared.
+/// Interrupt-context: the read-modify-write of each SIEFP word is
+/// race-free because the host only ever sets bits we haven't cleared.
 pub extern "x86-interrupt" fn vmbus_isr(_frame: InterruptStackFrame) {
+    let slot = slot_of(cpu_local::current_cpu_id());
+
     // (1) SIMP edge: peek the message_type u32 at the start of the
     // SINT2 slot. Wake without clearing — synic::ack_message handles
     // the actual drain after the waker-woken future reads the slot.
-    let simp = SIMP_VADDR.load(Ordering::Relaxed);
+    let simp = SIMP_VADDR[slot].load(Ordering::Relaxed);
     if simp != 0 {
         let msg_type_ptr = (simp + (crate::msr::VMBUS_SINT as usize) * 256) as *const u32;
         // SAFETY: SIMP is a 4 KiB DMA page we own; SINT2 slot sits at
@@ -101,13 +130,13 @@ pub extern "x86-interrupt" fn vmbus_isr(_frame: InterruptStackFrame) {
     }
 
     // (2) SIEFP scan: clear set bits and wake per-channel wakers.
-    let siefp = SIEFP_VADDR.load(Ordering::Relaxed);
+    let siefp = SIEFP_VADDR[slot].load(Ordering::Relaxed);
     if siefp != 0 {
-        let slot = (siefp + (crate::msr::VMBUS_SINT as usize) * 256) as *mut u64;
+        let slot_ptr = (siefp + (crate::msr::VMBUS_SINT as usize) * 256) as *mut u64;
         for word_idx in 0..32usize {
             // SAFETY: SIEFP slot bounds checked above.
             unsafe {
-                let p = slot.add(word_idx);
+                let p = slot_ptr.add(word_idx);
                 let mut w = core::ptr::read_volatile(p);
                 if w == 0 {
                     continue;
@@ -129,14 +158,20 @@ pub extern "x86-interrupt" fn vmbus_isr(_frame: InterruptStackFrame) {
     }
 }
 
-/// Publish the SIEFP page address to [`vmbus_isr`]. Called by
-/// [`crate::try_init`] on success.
-pub(crate) fn publish_siefp(vaddr: usize) {
-    SIEFP_VADDR.store(vaddr, Ordering::Release);
+/// Publish a CPU's SIEFP page address to [`vmbus_isr`].
+///
+/// Called by [`crate::try_init`] with `CpuId::Bsp` after BSP-side
+/// SynIC bring-up. AP-side SynIC bring-up (future work) calls this
+/// with the AP's `CpuId` from inside that AP's startup path.
+pub(crate) fn publish_siefp(cpu: CpuId, vaddr: usize) {
+    SIEFP_VADDR[slot_of(cpu)].store(vaddr, Ordering::Release);
 }
 
-/// Publish the SIMP page address to [`vmbus_isr`]. Called by
-/// [`crate::try_init`] on success.
-pub(crate) fn publish_simp(vaddr: usize) {
-    SIMP_VADDR.store(vaddr, Ordering::Release);
+/// Publish a CPU's SIMP page address to [`vmbus_isr`].
+///
+/// Called by [`crate::try_init`] with `CpuId::Bsp` after BSP-side
+/// SynIC bring-up. AP-side SynIC bring-up (future work) calls this
+/// with the AP's `CpuId` from inside that AP's startup path.
+pub(crate) fn publish_simp(cpu: CpuId, vaddr: usize) {
+    SIMP_VADDR[slot_of(cpu)].store(vaddr, Ordering::Release);
 }

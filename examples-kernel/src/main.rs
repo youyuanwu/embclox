@@ -197,9 +197,7 @@ unsafe extern "C" fn kmain() -> ! {
             embclox_hal_x86::smp::set_ap_init_params(tsc_per_us, lapic_vaddr);
             // Safety: ap_entry never returns, and we have populated the
             // AP init params above (release-ordered).
-            let started = unsafe {
-                embclox_hal_x86::smp::bring_up_aps(mp, max_aps, ap_entry)
-            };
+            let started = unsafe { embclox_hal_x86::smp::bring_up_aps(mp, max_aps, ap_entry) };
             info!("smp: {} of {} requested AP(s) brought up", started, max_aps);
         } else {
             warn!("smp=on but Limine returned no MP response; running single-CPU");
@@ -255,10 +253,8 @@ unsafe extern "C" fn kmain() -> ! {
 /// every interrupt (APIC timer ticks at 1 ms). The test harness can
 /// grep for "AP N alive" log lines plus the final counter dump to
 /// verify each AP entered Rust and is responding to its APIC timer.
-static AP_COUNTERS: [core::sync::atomic::AtomicUsize;
-    embclox_hal_x86::cpu_local::MAX_CPUS] = [const {
-    core::sync::atomic::AtomicUsize::new(0)
-}; embclox_hal_x86::cpu_local::MAX_CPUS];
+static AP_COUNTERS: [core::sync::atomic::AtomicUsize; embclox_hal_x86::cpu_local::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; embclox_hal_x86::cpu_local::MAX_CPUS];
 
 /// AP entry thunk. Limine calls this with `&Cpu` after writing
 /// `cpu.goto_address`; we reconstruct `ApInit` from the per-CPU
@@ -286,8 +282,7 @@ unsafe extern "C" fn ap_entry(cpu: &embclox_hal_x86::limine_boot::limine::mp::Cp
     x86_64::instructions::interrupts::enable();
     loop {
         x86_64::instructions::interrupts::enable_and_hlt();
-        AP_COUNTERS[processor_id as usize]
-            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        AP_COUNTERS[processor_id as usize].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
 }
 
