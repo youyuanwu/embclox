@@ -21,7 +21,6 @@ use embclox_core::dma_alloc::BootDmaAllocator;
 use embclox_driver::{
     DriverRegistry, DynNic, PROBE_BUDGET, ProbeCtx, ProbedNic, register_default_drivers,
 };
-use embclox_hal_x86::apic::LocalApic;
 use embclox_hal_x86::ioapic::IoApic;
 use embclox_hal_x86::vector_alloc::VectorAllocator;
 use log::*;
@@ -65,13 +64,13 @@ unsafe extern "C" fn kmain() -> ! {
     embclox_hal_x86::idt::init();
     embclox_hal_x86::pic::disable();
 
-    let lapic_vaddr = p
-        .memory
-        .map_mmio(embclox_hal_x86::apic::LAPIC_PHYS_BASE, 0x1000)
-        .vaddr();
-    let mut lapic = LocalApic::new(lapic_vaddr);
-    lapic.enable();
-    embclox_hal_x86::cpu_local::init_bsp(lapic.id());
+    embclox_hal_x86::apic::init(
+        p.memory
+            .map_mmio(embclox_hal_x86::apic::LAPIC_PHYS_BASE, 0x1000)
+            .vaddr(),
+    );
+    embclox_hal_x86::apic::enable();
+    embclox_hal_x86::cpu_local::init_bsp(embclox_hal_x86::apic::id());
 
     // TSC calibration: prefer Hyper-V TSC freq MSR on Hyper-V, fall back
     // to the PIT, fall back to 2.4 GHz if neither works.
@@ -81,7 +80,7 @@ unsafe extern "C" fn kmain() -> ! {
     embclox_hal_x86::time::set_tsc_per_us(tsc_per_us);
     info!("TSC: {} cycles/us", tsc_per_us);
 
-    embclox_hal_x86::runtime::start_apic_timer(lapic, tsc_per_us, 1_000);
+    embclox_hal_x86::runtime::start_apic_timer(tsc_per_us);
 
     // IOAPIC
     let ioapic_vaddr = p
@@ -199,7 +198,7 @@ unsafe extern "C" fn kmain() -> ! {
             let max_aps = smp_cfg
                 .max_aps
                 .unwrap_or(embclox_hal_x86::cpu_local::MAX_CPUS - 1);
-            embclox_hal_x86::smp::set_ap_init_params(tsc_per_us, lapic_vaddr);
+            embclox_hal_x86::smp::set_ap_init_params(tsc_per_us);
             // Safety: ap_entry never returns, and we have populated the
             // AP init params above (release-ordered).
             let started = unsafe { embclox_hal_x86::smp::bring_up_aps(mp, max_aps, app::ap_entry) };

@@ -25,16 +25,17 @@
 //! ## Usage
 //!
 //! ```ignore
-//! // After enabling LAPIC and calibrating TSC:
+//! // After init+enable LAPIC and calibrating TSC:
+//! embclox_hal_x86::apic::init(lapic_vaddr);
+//! embclox_hal_x86::apic::enable();
 //! embclox_hal_x86::time::set_tsc_per_us(tsc_per_us);
 //! embclox_hal_x86::idt::init();
-//! embclox_hal_x86::runtime::start_apic_timer(lapic, tsc_per_us, 1_000);
+//! embclox_hal_x86::runtime::start_apic_timer(tsc_per_us, 1_000);
 //!
 //! // ... spawn embassy tasks ...
 //! embclox_hal_x86::runtime::run_executor(executor);  // never returns
 //! ```
 
-use crate::apic::LocalApic;
 use embassy_executor::raw::Executor;
 use x86_64::structures::idt::InterruptStackFrame;
 
@@ -42,27 +43,30 @@ use x86_64::structures::idt::InterruptStackFrame;
 pub const APIC_TIMER_VECTOR: u8 = 32;
 
 /// IDT vector used for the spurious interrupt handler. The LAPIC SVR
-/// register is programmed with this value during [`crate::apic::LocalApic::enable`].
+/// register is programmed with this value during [`crate::apic::enable`].
 pub const SPURIOUS_VECTOR: u8 = 39;
 
-/// LAPIC handle stashed at [`start_apic_timer`] so ISRs can issue the
-/// End-of-Interrupt write. Single-core only.
-static mut LAPIC: Option<LocalApic> = None;
+/// APIC periodic-timer period. 1 ms is the embassy alarm granularity
+/// we target; the BSP and every AP program their LAPIC timer with this
+/// same period via [`start_apic_timer`] / [`ap_start_apic_timer`].
+pub const APIC_TIMER_PERIOD_US: u32 = 1_000;
+
+/// LAPIC divider used by the periodic timer. Fixed at 16; the
+/// [`start_apic_timer`] / [`ap_start_apic_timer`] callers compute
+/// `count = (tsc_per_us * APIC_TIMER_PERIOD_US) / APIC_TIMER_DIVIDER`.
+const APIC_TIMER_DIVIDER: u8 = 16;
 
 /// EOI helper for use inside any device ISR routed through the LAPIC.
 ///
 /// SynIC SINT vectors configured with auto-EOI (e.g. VMBus on Hyper-V)
 /// must NOT call this — they ack themselves.
 ///
-/// # Safety
-/// Caller is asserting we're in a single-core context where the LAPIC
-/// stashed by [`start_apic_timer`] is the right one for this CPU.
+/// Forwards to [`crate::apic::eoi`], which acts on **the executing
+/// CPU's** LAPIC (LAPIC MMIO is per-CPU-physical, so the underlying
+/// MMIO store always hits the right LAPIC regardless of which CPU
+/// originally set up the mapping).
 pub fn lapic_eoi() {
-    unsafe {
-        if let Some(lapic) = (*core::ptr::addr_of!(LAPIC)).as_ref() {
-            lapic.end_of_interrupt();
-        }
-    }
+    crate::apic::eoi();
 }
 
 /// APIC periodic-timer ISR. Advances embassy alarms then EOIs.
@@ -75,41 +79,53 @@ extern "x86-interrupt" fn apic_timer_isr(_frame: InterruptStackFrame) {
 /// installed but does not need to EOI.
 extern "x86-interrupt" fn spurious_isr(_frame: InterruptStackFrame) {}
 
-/// Install the APIC timer + spurious ISRs and start the periodic timer.
+/// Compute the LAPIC initial-count for the periodic timer at the
+/// shared [`APIC_TIMER_PERIOD_US`] / [`APIC_TIMER_DIVIDER`].
+fn timer_count(tsc_per_us: u64) -> u32 {
+    // With divider=16 and tsc_per_us ~2000 (2 GHz), 1 ms approx 125_000 -
+    // well within u32.
+    ((tsc_per_us * APIC_TIMER_PERIOD_US as u64) / APIC_TIMER_DIVIDER as u64) as u32
+}
+
+/// Install the APIC timer + spurious ISRs (shared IDT) and start
+/// **this CPU's** periodic timer at [`APIC_TIMER_PERIOD_US`].
 ///
 /// Caller must have already:
-/// - enabled the LAPIC (`lapic.enable()`)
-/// - called [`crate::time::set_tsc_per_us`] with the calibrated frequency
-/// - called [`crate::idt::init`] so the IDT exists
+/// - called [`crate::apic::init`] and [`crate::apic::enable`] (BSP).
+/// - called [`crate::time::set_tsc_per_us`] with the calibrated frequency.
+/// - called [`crate::idt::init`] so the IDT exists.
 ///
-/// `tsc_per_us` must match the value passed to `set_tsc_per_us`; we use
-/// it to derive the LAPIC count from `period_us`.
-///
-/// `period_us` selects the timer period (1000 µs = 1 ms is a reasonable
-/// default for embassy alarm granularity). The LAPIC divider is fixed
-/// at 16, so the maximum representable period is bounded by
-/// `u32::MAX * 16 / tsc_per_us` µs.
-pub fn start_apic_timer(mut lapic: LocalApic, tsc_per_us: u64, period_us: u32) {
+/// `tsc_per_us` must match the value passed to `set_tsc_per_us`; we
+/// use it to derive the LAPIC count.
+pub fn start_apic_timer(tsc_per_us: u64) {
     unsafe {
         crate::idt::set_handler(APIC_TIMER_VECTOR, apic_timer_isr);
         crate::idt::set_handler(SPURIOUS_VECTOR, spurious_isr);
     }
 
-    // LAPIC count = (TSC ticks for one period) / divider. With divider=16
-    // and tsc_per_us ~2000 (2 GHz), 1 ms ≈ 125_000 — well within u32.
-    let count = ((tsc_per_us * period_us as u64) / 16) as u32;
-    lapic.set_timer_periodic(APIC_TIMER_VECTOR, 16, count);
-
-    unsafe {
-        *core::ptr::addr_of_mut!(LAPIC) = Some(lapic);
-    }
+    let count = timer_count(tsc_per_us);
+    crate::apic::set_timer_periodic(APIC_TIMER_VECTOR, APIC_TIMER_DIVIDER, count);
 
     log::info!(
         "runtime: APIC timer started (vector={}, period={}us, count={})",
         APIC_TIMER_VECTOR,
-        period_us,
+        APIC_TIMER_PERIOD_US,
         count
     );
+}
+
+/// Program **this CPU's** APIC timer at the shared [`APIC_TIMER_PERIOD_US`].
+///
+/// Called from each AP's `smp::ap_setup` after the AP has enabled its
+/// LAPIC. The IDT handlers were already installed once by
+/// [`start_apic_timer`] on the BSP and are shared across CPUs, so we
+/// only need to program this CPU's LAPIC timer here.
+///
+/// `tsc_per_us` is the same value the BSP calibrated; the AP receives
+/// it via `ApInit`.
+pub fn ap_start_apic_timer(tsc_per_us: u64) {
+    let count = timer_count(tsc_per_us);
+    crate::apic::set_timer_periodic(APIC_TIMER_VECTOR, APIC_TIMER_DIVIDER, count);
 }
 
 /// Canonical executor loop: enable interrupts, poll embassy, `hlt`

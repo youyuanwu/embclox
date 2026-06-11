@@ -83,11 +83,11 @@ be added later without disturbing the per-CPU executor model.
 │ DriverRegistry / PCI scan results                │
 │ Memory map / heap / HHDM                         │
 │ embassy-time driver (single global, per-CPU slot)│
+│ LAPIC MMIO VA (shared mapping, per-CPU physical) │
 └──────────────────────────────────────────────────┘
 
 per-CPU (read via GS_BASE):
 ┌─ CPU 0 (BSP) ──────┐  ┌─ CPU 1 ────────────┐  ┌─ CPU N ────────────┐
-│ LocalApic          │  │ LocalApic          │  │ LocalApic          │
 │ APIC timer ISR     │  │ APIC timer ISR     │  │ APIC timer ISR     │
 │ embassy Executor   │  │ embassy Executor   │  │ embassy Executor   │
 │ time alarm slots   │  │ time alarm slots   │  │ time alarm slots   │
@@ -139,17 +139,20 @@ into a callback we provide. The handshake:
 The public API lives in
 [crates/embclox-hal-x86/src/smp.rs](../../crates/embclox-hal-x86/src/smp.rs):
 
-- `ApInit { cpu_id, apic_id, tsc_per_us, lapic_vaddr }` — passed
+- `ApInit { cpu_id, apic_id, tsc_per_us }` — passed
   to the kernel's AP entry function.
-- `set_ap_init_params(tsc_per_us, lapic_vaddr)` — BSP stashes the
-  shared values into two atomics before bring-up.
+- `set_ap_init_params(tsc_per_us)` — BSP stashes the
+  shared TSC value into an atomic before bring-up. The LAPIC
+  MMIO VA is module-global in [`crate::apic`] (set by
+  `apic::init` on the BSP) and shared across all CPUs, so it
+  doesn't need to be propagated through `ApInit`.
 - `bring_up_aps(mp, max_aps, thunk)` — walks `cpus()`, assigns
   processor_ids, writes `goto_address`.
 - `ap_init_from(&Cpu) -> ApInit` — AP thunk reconstructs its init
   state from the Limine `Cpu` entry.
 - `ap_setup(init)` — AP-side boot helper (`init_ap` +
-  `idt::load_current_cpu` + LAPIC enable + periodic timer
-  programming).
+  `idt::load_current_cpu` + `apic::enable` +
+  `runtime::ap_start_apic_timer`).
 - `check_tsc_sync(bsp_tsc, tsc_per_us) -> i64` — optional AP
   self-check that `|tsc_ap - tsc_bsp| < 1 ms`.
 
@@ -180,12 +183,17 @@ The currently-executing CPU's `processor_id` is held in `GS_BASE`
   the slot and write `GS_BASE`.
 - `current_cpu_id()` / `current()` / `by_id(cpu)` read the slot.
 
-The `LocalApic` handle is **not** stored in `CpuLocal`. The single
-global `static mut LAPIC` in
-[crates/embclox-hal-x86/src/runtime.rs](../../crates/embclox-hal-x86/src/runtime.rs)
-is used only for `lapic_eoi()`, and LAPIC MMIO at `0xFEE000B0` is
-per-CPU-physical: an EOI write to that VA from any CPU EOIs *that*
-CPU's local APIC. No per-CPU LAPIC handle is needed.
+The LAPIC is **not** modelled as a per-CPU object. It's a per-CPU
+hardware singleton accessed at a fixed physical address
+(`0xFEE00000`), which the BSP maps once and caches in
+[crates/embclox-hal-x86/src/apic.rs](../../crates/embclox-hal-x86/src/apic.rs)
+via `apic::init(vaddr)`. From then on, every operation in that
+module (`apic::enable`, `apic::id`, `apic::set_timer_periodic`,
+`apic::eoi`, …) is a free function that always acts on **the
+executing CPU's** LAPIC — LAPIC MMIO is per-CPU-physical, so an
+MMIO store at the cached VA from CPU *k* lands on CPU *k*'s
+LAPIC. There is no `LocalApic` struct and no per-CPU LAPIC
+handle.
 
 ## CpuId
 

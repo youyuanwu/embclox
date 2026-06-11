@@ -13,11 +13,9 @@
 //! `on_ap_ready`: it loads `GS_BASE` with the processor id, loads the
 //! shared IDT, enables the LAPIC, and starts the per-CPU APIC timer.
 
-use crate::apic::LocalApic;
 use crate::cpu_local::{self, MAX_CPUS};
-use crate::runtime::APIC_TIMER_VECTOR;
 use crate::vector_alloc::CpuId;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 use limine::mp::Cpu;
 use limine::response::MpResponse;
 
@@ -32,32 +30,27 @@ pub struct ApInit {
     /// TSC ticks-per-microsecond, calibrated on the BSP and copied
     /// to each AP so all CPUs share the same `embassy-time` epoch.
     pub tsc_per_us: u64,
-    /// Virtual address the LAPIC MMIO window is mapped to. The same
-    /// VA on every CPU resolves to that CPU's own LAPIC MMIO state
-    /// (per-CPU physical register file shadowed at the same paddr).
-    pub lapic_vaddr: usize,
 }
 
-/// Shared parameters every AP needs (TSC freq, LAPIC vaddr).
+/// Shared parameter every AP needs (TSC freq).
 ///
 /// The BSP populates this with [`set_ap_init_params`] before calling
 /// [`bring_up_aps`]; each AP reads it from inside its `goto_address`
-/// thunk. Two `u64`s is enough because all APs use the same TSC
-/// calibration and the same MMIO VA for the LAPIC window.
+/// thunk. The LAPIC MMIO VA is cached in [`crate::apic`] (via
+/// [`crate::apic::init`] on the BSP) and is the same on every CPU,
+/// so it doesn't need to be propagated through `ApInit`.
 static AP_TSC_PER_US: AtomicU64 = AtomicU64::new(0);
-static AP_LAPIC_VADDR: AtomicUsize = AtomicUsize::new(0);
 
 /// Stash the parameters the AP startup path needs. Call once from
 /// the BSP before [`bring_up_aps`].
-pub fn set_ap_init_params(tsc_per_us: u64, lapic_vaddr: usize) {
+pub fn set_ap_init_params(tsc_per_us: u64) {
     AP_TSC_PER_US.store(tsc_per_us, Ordering::Release);
-    AP_LAPIC_VADDR.store(lapic_vaddr, Ordering::Release);
 }
 
 /// Reconstruct an [`ApInit`] from inside an AP `goto_address` thunk.
 ///
 /// `cpu.extra` carries the `processor_id` written by [`bring_up_aps`];
-/// the shared TSC + LAPIC vaddr come from the statics populated by
+/// the shared TSC comes from the static populated by
 /// [`set_ap_init_params`].
 pub fn ap_init_from(cpu: &Cpu) -> ApInit {
     let processor_id = cpu.extra.load(Ordering::Acquire) as u8;
@@ -65,7 +58,6 @@ pub fn ap_init_from(cpu: &Cpu) -> ApInit {
         cpu_id: CpuId::Ap(processor_id),
         apic_id: cpu.lapic_id as u8,
         tsc_per_us: AP_TSC_PER_US.load(Ordering::Acquire),
-        lapic_vaddr: AP_LAPIC_VADDR.load(Ordering::Acquire),
     }
 }
 
@@ -159,11 +151,13 @@ pub unsafe fn bring_up_aps(
 /// 1. Writes `GS_BASE` to `init.processor_id` so `current_cpu_id()`
 ///    returns the right value for this CPU.
 /// 2. Loads the shared IDT register (`lidt`).
-/// 3. Constructs a `LocalApic` from `init.lapic_vaddr`, enables it,
-///    and programs the periodic timer at the same vector and period
-///    as the BSP. The single global `LAPIC` stash in `runtime` is
-///    untouched — `lapic_eoi()` works for the AP too because LAPIC
-///    MMIO is per-CPU at the same paddr.
+/// 3. Enables **this CPU's** LAPIC via [`crate::apic::enable`] and
+///    programs its periodic timer via [`crate::runtime::ap_start_apic_timer`]
+///    using the vector + period the BSP picked in
+///    [`crate::runtime::start_apic_timer`]. The LAPIC MMIO VA is
+///    already cached module-globally in [`crate::apic`]; LAPIC MMIO
+///    is per-CPU-physical so these calls only ever touch this CPU's
+///    LAPIC.
 ///
 /// # Safety
 /// Must be called exactly once per AP, on the AP itself, before any
@@ -181,19 +175,14 @@ pub unsafe fn ap_setup(init: ApInit) {
     // loading the IDT register on this CPU.
     unsafe { crate::idt::load_current_cpu() };
 
-    let mut lapic = LocalApic::new(init.lapic_vaddr);
-    lapic.enable();
-
-    // Same divider (16) and period as runtime::start_apic_timer.
-    let period_us: u32 = 1_000;
-    let count = ((init.tsc_per_us * period_us as u64) / 16) as u32;
-    lapic.set_timer_periodic(APIC_TIMER_VECTOR, 16, count);
+    crate::apic::enable();
+    crate::runtime::ap_start_apic_timer(init.tsc_per_us);
 
     log::info!(
-        "smp: AP {} ready (apic_id={}, lapic_vaddr={:#x})",
+        "smp: AP {} ready (apic_id={}, tsc/us={})",
         processor_id,
         init.apic_id,
-        init.lapic_vaddr
+        init.tsc_per_us
     );
 }
 
