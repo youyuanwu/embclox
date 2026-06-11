@@ -1,34 +1,42 @@
 # SMP via per-CPU executors (Option A)
 
-## Status: planning
+## Status: shipped
 
-Bring up application processors (APs) so embclox can run on more
-than one core. Each CPU gets its own embassy executor and its own
-async runtime; tasks are pinned to a CPU at spawn time and never
-migrate. IRQs are routed to a specific CPU and that CPU's executor
-wakes its local tasks.
+APs now boot via the Limine MP request and run their own ISR + APIC
+timer alongside the BSP. Tasks are pinned to the CPU that spawned
+them; there is no migration. IRQs are routed to a specific CPU at
+probe time and that CPU's executor sees the resulting wake.
 
 This is the "Option A" path from the SMP architecture discussion:
 the lightest-weight way to use additional cores while keeping the
 existing driver shape intact.
 
+Shipped across 7 commits on `dev` plus this design doc; runtime is
+opt-in via the `smp=on` cmdline token (see
+[examples-kernel/limine-smp.conf](../../examples-kernel/limine-smp.conf)).
+The new `kernel-echo-e1000-smp` ctest lane exercises the path
+end-to-end under `qemu -smp 4`.
+
 ## Goals and non-goals
 
 ### Goals
 
-- Boot APs via the Limine SMP request; each AP enters Rust running
-  its own `run_executor` loop.
-- One embassy executor per CPU, owning its own task set. No task
-  migration.
-- Per-CPU LAPIC handle, per-CPU APIC timer driving `embassy-time`.
+- Boot APs via the Limine MP request; each AP enters Rust running
+  per-CPU ISR + APIC timer setup. (The example kernel today runs
+  APs in a halt-loop heartbeat; full per-CPU embassy executor
+  instantiation is a kernel-side concern, not a HAL one.)
+- Per-CPU LAPIC handle is **not** needed (single global stash
+  works for cross-CPU EOI; see [Per-CPU statics](#per-cpu-statics)).
+  Per-CPU APIC timer drives `embassy-time` via per-CPU alarm slots.
 - IRQ routing: each device IRQ is delivered to exactly one CPU
   (chosen at driver init), and that CPU's executor sees the
   resulting wake.
 - Driver-facing APIs unchanged: `AtomicWaker`-based wakes keep
   working because the wake fires on the same CPU as the IRQ and
   the executor that owns the registered waker.
-- Existing single-CPU example kernels keep working with zero source
-  changes (build-time gate or runtime "1 CPU detected" path).
+- Existing single-CPU kernel build keeps working unchanged. SMP is
+  opt-in via the `smp=on` cmdline token; default behaviour leaves
+  APs in Limine's spin loop.
 
 ### Non-goals
 
@@ -98,182 +106,157 @@ pair lives on the same CPU.
 
 ## Bringing up APs
 
-Limine has a built-in SMP request that boots APs into a callback
-we provide. The handshake is:
+Limine has a built-in MP (multi-processor) request that boots APs
+into a callback we provide. The handshake:
 
-1. BSP declares `SmpRequest` alongside the other Limine requests
-   (extend the `limine_boot_requests!` macro in
-   [crates/embclox-hal-x86/src/limine_boot.rs](../../crates/embclox-hal-x86/src/limine_boot.rs)).
-2. After `kmain` has finished single-threaded boot (heap, IDT, PCI
-   scan, driver probe), it walks the SMP response's `cpus[]` array.
-   For each entry it gets a sequential `processor_id` (Limine's own
-   0..N numbering) and an `lapic_id` (hardware-assigned, possibly
-   sparse).
-3. For each AP, BSP allocates a per-CPU `CpuLocal` block and stores
-   it in `CPU_LOCALS[processor_id]`. The block is populated *before*
-   the AP is told to start; Limine guarantees the AP's `goto_address`
-   store is release-ordered relative to the AP's first instruction
-   fetch, so the AP sees the populated block.
-4. BSP writes a `goto_address` that points at `ap_entry`. Limine
-   also gives each AP its own stack via `cpus[i].stack`; we use
-   that as-is (no separate stack allocation needed).
-5. Each AP enters `ap_entry`, loads `GS_BASE` with the address of
-   its `CpuLocal` block (looked up by `processor_id` passed via
-   `cpus[i].extra_argument`), enables its LAPIC + APIC timer, then
-   calls `run_executor` on its own executor.
+1. BSP declares `MpRequest` alongside the other Limine requests.
+   The macro in
+   [crates/embclox-hal-x86/src/limine_boot.rs](../../crates/embclox-hal-x86/src/limine_boot.rs)
+   places the request in `.requests` and exposes a `pub fn
+   mp_response()` accessor on the generated module.
+2. After `kmain` finishes single-threaded boot (heap, IDT, PCI
+   scan, driver probe), it walks the MP response's `cpus()` slice.
+   Each entry has the ACPI `id`, the hardware `lapic_id`, a
+   `goto_address` field the bootloader is spinning on, and an
+   `extra` atomic the kernel can use as a per-AP scratch word.
+3. For each AP, BSP assigns a sequential `processor_id` (1..N,
+   skipping the BSP), writes that to `cpu.extra` (release-ordered),
+   then writes `cpu.goto_address = ap_entry`. Limine guarantees the
+   `goto_address` store is release-ordered relative to the AP's
+   first instruction fetch, so the AP sees the `extra` value.
+4. Limine gives each AP its own stack via the bootloader; we use
+   that as-is and never allocate a separate AP stack.
+5. Each AP enters the kernel-supplied `ap_entry` thunk, which calls
+   `smp::ap_init_from(cpu)` to rebuild its `ApInit` from the per-AP
+   `extra` plus the shared TSC + LAPIC vaddr stashed by
+   `smp::set_ap_init_params`, then calls `smp::ap_setup(init)` to
+   finish per-CPU boot (slot + GS_BASE + IDT + LAPIC + APIC timer).
 
-```rust
-// new public API in embclox-hal-x86::smp
-pub struct ApInit {
-    pub cpu_id: CpuId,        // CpuId::Ap(processor_id)
-    pub apic_id: u32,         // from Limine cpus[i].lapic_id
-    pub tsc_per_us: u64,      // BSP-calibrated, copied to AP
-}
+The public API lives in
+[crates/embclox-hal-x86/src/smp.rs](../../crates/embclox-hal-x86/src/smp.rs):
 
-pub fn bring_up_aps(
-    smp_response: &SmpResponse,
-    on_ap_ready: extern "C" fn(ApInit) -> !,
-);
-```
+- `ApInit { cpu_id, apic_id, tsc_per_us, lapic_vaddr }` — passed
+  to the kernel's AP entry function.
+- `set_ap_init_params(tsc_per_us, lapic_vaddr)` — BSP stashes the
+  shared values into two atomics before bring-up.
+- `bring_up_aps(mp, max_aps, thunk)` — walks `cpus()`, assigns
+  processor_ids, writes `goto_address`.
+- `ap_init_from(&Cpu) -> ApInit` — AP thunk reconstructs its init
+  state from the Limine `Cpu` entry.
+- `ap_setup(init)` — AP-side boot helper (`init_ap` +
+  `idt::load_current_cpu` + LAPIC enable + periodic timer
+  programming).
+- `check_tsc_sync(bsp_tsc, tsc_per_us) -> i64` — optional AP
+  self-check that `|tsc_ap - tsc_bsp| < 1 ms`.
 
-`on_ap_ready` is supplied by the kernel binary (so the kernel
-chooses what tasks to spawn on each AP). The HAL gives APs a
-canonical setup helper:
-
-```rust
-pub fn ap_setup(init: ApInit) -> Peripherals { ... }
-// loads GS_BASE, installs IDT pointer, enables LAPIC, starts APIC timer.
-// returns the per-CPU peripherals
-```
+`ap_entry` lives in the kernel binary (see
+[examples-kernel/src/main.rs](../../examples-kernel/src/main.rs)):
+a small thunk that calls `ap_init_from` + `ap_setup` and then
+enters its workload (today a halt-loop heartbeat that increments
+`AP_COUNTERS[processor_id]`).
 
 ## Per-CPU statics
 
-x86 convention is to point `GS_BASE` (set via
-`wrmsr IA32_KERNEL_GS_BASE`) at a per-CPU data block. embclox today
-has no per-CPU data because there's only one CPU; this work
-introduces a fixed-size table indexed by sequential `processor_id`:
+A fixed-size table indexed by sequential `processor_id`, defined
+in [crates/embclox-hal-x86/src/cpu_local.rs](../../crates/embclox-hal-x86/src/cpu_local.rs).
+The currently-executing CPU's `processor_id` is held in `GS_BASE`
+(kernel-mode `IA32_GS_BASE`), written once during `init_bsp` /
+`init_ap` and read back as a plain `mov gs:0`.
 
-```rust
-// embclox-hal-x86::cpu_local
-pub const MAX_CPUS: usize = 8;   // covers QEMU smoke tests, Hyper-V, Azure
+- `MAX_CPUS = 8` — fixed, covers QEMU smoke tests, Hyper-V Gen1 /
+  Azure standard SKUs, with headroom.
+- `CpuLocal { cpu_id, apic_id }` — populated once per CPU. The
+  field set is intentionally small: only the data the ISRs and the
+  per-CPU IRQ routing actually need.
+- `static CPU_LOCALS: [spin::Once<CpuLocal>; MAX_CPUS]` — first
+  call wins; later `init_*` calls are no-ops.
+- `init_bsp(apic_id)` / `init_ap(processor_id, apic_id)` populate
+  the slot and write `GS_BASE`.
+- `current_cpu_id()` / `current()` / `by_id(cpu)` read the slot.
 
-#[repr(C)]
-pub struct CpuLocal {
-    pub cpu_id: CpuId,
-    pub apic_id: u32,
-    pub lapic: LocalApic,
-    pub executor: &'static Executor,
-}
-
-static CPU_LOCALS: [OnceCell<CpuLocal>; MAX_CPUS] = [const { OnceCell::new() }; MAX_CPUS];
-
-pub fn current() -> &'static CpuLocal { ... }   // reads GS_BASE
-pub fn current_cpu_id() -> CpuId { current().cpu_id }
-pub fn by_id(cpu: CpuId) -> Option<&'static CpuLocal> { ... }
-```
-
-The block is populated by BSP during `bring_up_aps` (BSP also gets
-one, at `CPU_LOCALS[0]`). Each AP loads its own block's address
-into `GS_BASE` in `ap_setup`. `MAX_CPUS = 8` is hardcoded; the
-additional cost is 8 `CpuLocal` slots in BSS (a few hundred bytes
-total) and we can grow it if a target VM exposes more vCPUs.
-
-Modules that currently rely on `static mut LAPIC: Option<...>` in
+The `LocalApic` handle is **not** stored in `CpuLocal`. The single
+global `static mut LAPIC` in
 [crates/embclox-hal-x86/src/runtime.rs](../../crates/embclox-hal-x86/src/runtime.rs)
-become `cpu_local::current().lapic` accessors. The APIC timer ISR
-and the `lapic_eoi()` helper change shape but not semantics.
+is used only for `lapic_eoi()`, and LAPIC MMIO at `0xFEE000B0` is
+per-CPU-physical: an EOI write to that VA from any CPU EOIs *that*
+CPU's local APIC. No per-CPU LAPIC handle is needed.
 
-## CpuId becomes real
+## CpuId
 
-[crates/embclox-hal-x86/src/vector_alloc.rs](../../crates/embclox-hal-x86/src/vector_alloc.rs)
-already anticipates this. `CpuId::Ap` carries Limine's sequential
-`processor_id` (0..MAX_CPUS), not the LAPIC ID:
+Defined in
+[crates/embclox-hal-x86/src/vector_alloc.rs](../../crates/embclox-hal-x86/src/vector_alloc.rs):
+the `Bsp` variant is implicit `processor_id == 0`; the `Ap(u8)`
+variant carries the sequential `processor_id` (1..MAX_CPUS), not
+the LAPIC ID.
 
-```rust
-pub enum CpuId {
-    Bsp,        // == processor_id 0
-    Ap(u8),     // processor_id 1..MAX_CPUS
-}
-```
-
-The LAPIC ID is hardware-assigned and possibly sparse, so it's
-stored alongside in `CpuLocal::apic_id` rather than embedded in
-`CpuId`. `cpu_local::by_id(cpu).apic_id` is what `IoApic::enable_irq`
-feeds the IOAPIC redirection entry. Drivers handle `CpuId` as an
-opaque token and never need to look at the LAPIC ID directly.
+The LAPIC ID is hardware-assigned and possibly sparse, so it lives
+in `CpuLocal::apic_id` instead of being embedded in `CpuId`. The
+`CpuId::apic_id()` accessor resolves through `cpu_local::by_id` and
+is what `IoApic::enable_irq` feeds the IOAPIC redirection entry.
+Drivers treat `CpuId` as an opaque token and never see the LAPIC
+ID directly.
 
 ## IRQ routing
 
-Each device picks one CPU at probe time:
+Drivers route their PCI IRQ to a specific CPU at probe time via
+the new `ProbeCtx::install_pci_isr_on(line, handler, cpu_id)`
+entry point in
+[crates/embclox-driver/src/driver.rs](../../crates/embclox-driver/src/driver.rs).
+The existing `install_pci_isr(line, handler)` delegates to
+`install_pci_isr_on(..., CpuId::Bsp)` so BSP-only drivers compile
+unchanged.
 
-```rust
-// inside a driver's probe()
-let isr = ctx.install_pci_isr_on(line, handler, cpu)?;
-// ctx.install_pci_isr(...) keeps existing BSP-default behaviour
-```
-
-The current single-CPU `install_pci_isr` defaults to `CpuId::Bsp`;
-the SMP path adds `install_pci_isr_on(line, handler, cpu_id)` that
-allocates the vector from *that CPU's* VectorAllocator and writes
-the IOAPIC redirection entry pointing at `cpu_id.apic_id()`. The
-returned `InstalledIsr` already carries `cpu_id` so the driver's
-waker setup naturally lives on the same CPU.
+- The IDT vector pool is a single global `VectorAllocator` (vectors
+  33..47, 15 total), because the IDT is one shared structure across
+  all CPUs. CPU placement is purely an IOAPIC routing decision and
+  does not gate vector allocation. See
+  [crates/embclox-hal-x86/src/vector_alloc.rs](../../crates/embclox-hal-x86/src/vector_alloc.rs).
+- `VectorAllocator::allocate()` returns the bare `u8`; `ProbeCtx`
+  stamps the `InstalledIsr` with the caller-supplied `cpu_id` so
+  drivers can wire their per-CPU waker from the same `CpuId` the
+  ISR will run on.
+- The IOAPIC redirection entry's destination field is set to
+  `cpu_id.apic_id()`, so the AP whose LAPIC has that ID receives
+  the interrupt instead of the BSP.
 
 Hyper-V VMBus is per-vCPU on the host side too — each CPU has its
-own SIMP/SIEFP pages. SMP support for VMBus is therefore "set up
-per-CPU SIMP/SIEFP and route SINT2 per-CPU" rather than "broadcast
-one SINT2 vector to all CPUs". `embclox-hyperv::try_init` is
-already structured around this; the SMP work extends it to install
-per-CPU ISRs and publish per-CPU page pointers.
+own SCONTROL/SIMP/SIEFP/SINTx MSRs. The Phase 6 data-structure
+refactor in
+[crates/embclox-hyperv/src/isr.rs](../../crates/embclox-hyperv/src/isr.rs)
+turned the ISR's SIMP/SIEFP page lookups into per-CPU arrays
+indexed by `cpu_local::current_cpu_id()`. AP-side SynIC bring-up
+(actually programming the AP's MSRs and routing offers) is future
+work — see [VMBus per-CPU status](#vmbus-per-cpu-status) below.
 
 ## Executor and task placement
 
-Each CPU has its own `static Executor`, stored in a `StaticCell`
-slot in the same `[T; MAX_CPUS]` shape as `CPU_LOCALS`:
+Each CPU runs its own embassy `Executor` instance. We **don't need
+cross-CPU pender routing** because wakes are CPU-local by
+construction: a future running on CPU *k* registers wakers in CPU
+*k*'s state; an ISR on CPU *k* fires those wakers; the executor on
+CPU *k* is the one polled in the loop that runs on CPU *k*. The
+existing no-op `__pender` keeps working unchanged.
 
-```rust
-static EXECUTORS: [StaticCell<Executor>; MAX_CPUS] = [const { StaticCell::new() }; MAX_CPUS];
-```
+Flow per CPU:
 
-The `Executor::new(context_ptr)` constructor takes a context
-pointer that embassy passes back to the `__pender` callback when a
-task becomes ready. We **don't need cross-CPU pender routing**
-because wakes are already CPU-local by construction (a future
-running on CPU *k* registers wakers in CPU *k*'s state; an ISR on
-CPU *k* fires those wakers; the executor on CPU *k* is the one
-polled in the loop that runs on CPU *k*). The existing no-op
-`__pender` keeps working:
-
-- An ISR-driven wake sets the "ready" flag on CPU *k*'s executor.
-- The same IRQ that caused the wake also breaks CPU *k* out of
-  `hlt` in its own `run_executor` loop.
+- An ISR-driven wake sets the "ready" flag on this CPU's executor.
+- The same IRQ that caused the wake also breaks this CPU out of
+  `hlt` in its own `run_executor` loop
+  ([crates/embclox-hal-x86/src/runtime.rs](../../crates/embclox-hal-x86/src/runtime.rs)).
 - The next `executor.poll()` sees the ready flag and polls the
   task.
 
-This is exactly how the single-CPU build works today; the only
-change is that there are N independent instances of the loop
-instead of one. `context_ptr` is passed (set to
-`cpu_local::current() as *const _ as *mut ()`) for future use, but
-nothing routes by it today.
+### No per-CPU executor registry in the HAL
 
-The kernel chooses what to spawn on each CPU:
+The original design called for a `[Once<&'static Executor>;
+MAX_CPUS]` lookup in the HAL. We dropped it: embassy's `Executor`
+type contains `PhantomData<*mut ()>` and is therefore `!Sync`, so
+storing `&'static Executor` in a shared static requires an
+`unsafe impl Sync` wrapper for no benefit — the kernel owns each
+executor's `StaticCell` at the call site and never needs a global
+lookup table for it.
 
-```rust
-// BSP, inside kmain after probe
-spawner.spawn(net_stack_task()).unwrap();
-spawner.spawn(net_runner_task()).unwrap();
-
-// AP entry — kernel provides this; same binary, different code path
-extern "C" fn on_ap_ready(init: ApInit) -> ! {
-    let peripherals = hal::ap_setup(init);
-    let executor = hal::cpu_local::current().executor;
-    let spawner = executor.spawner();
-    spawner.spawn(worker_task()).unwrap();
-    hal::runtime::run_executor(executor)
-}
-```
-
-Spawning a task on a CPU requires a `Spawner` for that CPU's
+Spawning a task on a CPU still requires a `Spawner` for that CPU's
 executor. Cross-CPU spawn is intentionally awkward: the BSP can
 hand each AP a closure to call at startup, but there's no global
 `spawn(task)` that picks a CPU automatically. That stays out until
@@ -282,19 +265,15 @@ Option C.
 ## embassy-time per CPU
 
 `embassy_time_driver::time_driver_impl!` registers exactly one
-`Driver` for the whole program (see
-[crates/embclox-hal-x86/src/time.rs](../../crates/embclox-hal-x86/src/time.rs)).
-We keep the single global driver but shard its alarm slots by CPU.
-The existing flat `[Option<Alarm>; 8]` becomes per-CPU:
+`Driver` for the whole program (no per-CPU choice; it's a global
+by API). We keep the single global driver and shard its alarm slot
+array by CPU. See
+[crates/embclox-hal-x86/src/time.rs](../../crates/embclox-hal-x86/src/time.rs):
+the single `[Option<Alarm>; 8]` became
+`[Mutex<RefCell<[Option<Alarm>; 8]>>; MAX_CPUS]` indexed by
+`cpu_local::current_cpu_id()`.
 
-```rust
-struct ApicTimeDriver {
-    tsc_per_us: AtomicU64,
-    alarms: [Mutex<RefCell<[Option<Alarm>; MAX_ALARMS]>>; MAX_CPUS],
-}
-```
-
-Routing works because futures don't migrate:
+Routing works because tasks don't migrate:
 
 - `schedule_wake(at, waker)` runs in the context of the calling
   task, which is pinned to one CPU. It reads
@@ -312,9 +291,10 @@ Time itself (the monotonic clock) is global. Modern x86 guarantees
 invariant TSC across cores and we rely on Limine + the hypervisor
 to leave the APs' TSCs in sync with the BSP. Hyper-V Gen1 / Azure
 expose the InvariantTsc enlightenment which guarantees this; QEMU
-starts all vCPUs with TSC=0 at boot. Phase 3 of the implementation
-adds a sanity check: each AP reads TSC at startup and asserts the
-delta against the BSP's reference is `< 1 ms` worth of ticks.
+starts all vCPUs with TSC=0 at boot.
+[`smp::check_tsc_sync`](../../crates/embclox-hal-x86/src/smp.rs)
+is available as an AP self-check; the example kernel does not
+call it yet.
 
 ## Driver impact
 
@@ -329,11 +309,38 @@ source changes** to work under per-CPU executors. They use:
   CPU.
 - `dev.waker()` accessors (NetVSC). The per-channel waker table in
   [crates/embclox-hyperv/src/isr.rs](../../crates/embclox-hyperv/src/isr.rs)
-  becomes per-CPU once VMBus is SMP-aware; until then it stays on
-  the BSP.
+  is now indexed by `cpu_local::current_cpu_id()` for the per-CPU
+  SIMP/SIEFP slots; the per-channel relid table stays a single
+  global array (relids are bus-wide, not per-CPU).
 
-The only driver-facing change is the new `install_pci_isr_on(...,
-cpu_id)` API for drivers that explicitly want to land on an AP.
+The only driver-facing change is the new
+`install_pci_isr_on(line, handler, cpu_id)` API for drivers that
+explicitly want to land on an AP.
+
+## VMBus per-CPU status
+
+Phase 6 was a **data-structure refactor only**:
+
+- `isr::SIEFP_VADDR` / `SIMP_VADDR` became `[AtomicUsize; MAX_CPUS]`
+  indexed by `processor_id`.
+- `vmbus_isr` reads `cpu_local::current_cpu_id()` to pick its slot.
+- `publish_siefp` / `publish_simp` take a `CpuId` parameter.
+- `try_init` populates the BSP's slot (`CpuId::Bsp`).
+
+What did **not** ship in phase 6 (needs Hyper-V test env):
+
+- An `ap_setup_synic(cpu_id, dma)` helper that allocates per-AP
+  SIMP/SIEFP pages and writes the AP's SCONTROL/SIMP/SIEFP/SINT2
+  MSRs from inside the AP's context.
+- NetVSC `NumSubChannels = N` path (currently we send 0 =
+  single-queue; see `nvsp_request_single_queue` in
+  [crates/embclox-hyperv/src/netvsc.rs](../../crates/embclox-hyperv/src/netvsc.rs)).
+- Subchannel offer routing to APs.
+
+Until those land, VMBus stays single-CPU (BSP only) at runtime,
+which is the right behaviour for our current workloads. The data
+shape is ready for AP-side bring-up to be added later without
+touching `isr.rs` again.
 
 ## Single-queue NICs today (scaling cap)
 
@@ -396,81 +403,87 @@ SMP support follows the same model:
 - **Default behaviour is unchanged.** If no SMP cmdline arg is
   present, `kmain` skips `bring_up_aps`; the APs sit in their
   Limine-provided spin loop and never enter Rust. All existing
-  ctest lanes keep passing with no code or config changes.
-- **Opt-in via cmdline.** Add `smp=on` and `cpus=N` tokens to
+  ctest lanes pass with no code or config changes.
+- **Opt-in via cmdline.** The `smp=on` and `cpus=N` tokens are
+  parsed by `parse_smp` in
   [crates/embclox-hal-x86/src/cmdline.rs](../../crates/embclox-hal-x86/src/cmdline.rs)
   (same `whitespace-split` + `key=value` parser already used for
   `net=`, `ip=`, `gw=`, `nic=`). When `smp=on` is present, BSP
   calls `bring_up_aps` for up to `cpus=N` APs (capped at
-  `MAX_CPUS`) and routes a kernel-supplied `on_ap_ready` to each.
-  The AP entry function lives in `examples-kernel/src/main.rs`
+  `MAX_CPUS`) and routes the kernel-supplied `ap_entry` to each.
+  The AP entry function lives in
+  [examples-kernel/src/main.rs](../../examples-kernel/src/main.rs)
   next to `kmain`.
 - **No new kernel binary.** The SMP path is a runtime branch in the
   existing kernel, gated by cmdline. This matches how the NIC
   variants are selected today.
 
-## Test plan
+## Test plan (shipped)
 
-Per the current test harness shape
-([docs/design/test-framework.md](./test-framework.md)) and the
-existing cmdline-driven variant pattern:
+Per the test harness shape
+([docs/design/test-framework.md](./test-framework.md)):
 
-1. **Unit (qemu-tests/unit).** Add a suite that boots
-   `unit-tests.iso` with `-smp 4`, verifies all 4 CPUs entered
-   Rust, each ran their own APIC timer at least once, and that
-   `cpu_local::current_cpu_id()` returns a distinct value per CPU.
-   This requires `unit-iso` to set the `smp=on` cmdline.
-2. **New ctest lane `kernel-echo-e1000-smp`.** Same kernel ELF as
-   the existing `kernel-echo-e1000` lane, booted via a new
-   `limine-smp.conf` that adds `smp=on cpus=4` to the cmdline. QEMU
-   is invoked with `-smp 4`. NIC IRQ stays on BSP; APs run a
-   per-CPU idle counter task. After echo traffic completes, the
-   kernel dumps per-CPU counters over debug-out; the ctest harness
-   asserts all four advanced.
-3. **kernel-hyperv-\* (manual).** Existing Hyper-V lanes already
-   support cmdline selection; bring the SMP variants up by editing
-   `limine-hyperv.conf` to add `smp=on` and provisioning the VM
-   with 2+ vCPUs. Confirm boot + DHCP still pass and that the
-   second vCPU's APIC timer fires.
+1. **`cpu_local` unit suite** in
+   [qemu-tests/unit/src/suites/cpu_local.rs](../../qemu-tests/unit/src/suites/cpu_local.rs).
+   6 tests covering slot layout, idempotent `init_bsp`,
+   `current_cpu_id()` after init, `CpuId::apic_id()` resolution,
+   unpopulated-slot and out-of-range-slot behaviour.
+2. **`parse_smp` unit tests** added to
+   [crates/embclox-hal-x86/src/cmdline.rs](../../crates/embclox-hal-x86/src/cmdline.rs):
+   6 tests covering default-disabled, `smp=on` (case-insensitive),
+   `cpus=N`, malformed inputs.
+3. **`kernel-echo-e1000-smp` ctest lane** in
+   [examples-kernel/CMakeLists.txt](../../examples-kernel/CMakeLists.txt).
+   Boots `build/kernel-smp.iso` (same ELF as `kernel.iso`, different
+   limine cmdline: `smp=on cpus=4`) under `qemu -smp 4`. Passes
+   when: (a) e1000 TCP echo still works on BSP, and (b) the
+   `SMP CHECK: ap_counters=[0, n, n, n, ...]` log line shows
+   positive heartbeat counters for APs 1–3 (slot 0 stays 0 because
+   BSP never runs `ap_entry`).
 4. **`cargo build --target x86_64-unknown-none` + `cargo clippy -D
-   warnings`** continue to pass on the single workspace.
+   warnings`** clean on the workspace.
 
-The CMake changes are small: a new `limine-smp.conf` and a new
-ctest lane in [examples-kernel/CMakeLists.txt](../../examples-kernel/CMakeLists.txt)
-following the existing `kernel-echo-e1000` pattern.
+Hyper-V lanes were intentionally not modified: VMBus stays
+BSP-only at runtime, so existing `kernel-hyperv-netvsc` and
+`kernel-hyperv-tulip` paths are unchanged.
 
-## Implementation outline
+Last verified run (commit `c2946dc`, 4 lanes, 100% pass):
 
-Phases, in dependency order:
+```
+kernel-echo-e1000      11.15s
+kernel-echo-tulip      11.14s
+kernel-echo-e1000-smp  11.14s
+unit                    4.83s
+```
 
-1. **`CpuId` and per-CPU statics.** Promote `CpuId` to a real enum
-   with `Ap(u32)`. Add `embclox-hal-x86::cpu_local` module
-   (GS_BASE-backed `current()`). Adapt existing single-CPU users.
-2. **Limine SMP request.** Extend `limine_boot_requests!`. Add the
-   SMP response field to `LimineBootInfo`.
-3. **AP bring-up.** Add `bring_up_aps` + `ap_setup`. Each AP gets
-   its own LAPIC handle and APIC timer; per-CPU `CpuLocal` block
-   populated.
-4. **Per-CPU executor support.** `embassy-time` driver becomes
-   per-CPU; APIC-timer ISR advances local slots. `run_executor`
-   uses `cpu_local::current().executor`.
-5. **Per-CPU `VectorAllocator`.** `ProbeCtx` keeps its existing
-   `install_pci_isr(line, handler)` returning a BSP `InstalledIsr`;
-   add `install_pci_isr_on(line, handler, cpu_id)` that hits the
-   target CPU's allocator. IOAPIC routing uses
-   `CpuId::apic_id()`.
-6. **VMBus per-CPU.** When the target CPU has a Hyper-V-aware
-   driver, allocate per-CPU SIMP/SIEFP pages, install SINT2 per
-   CPU, publish per-CPU vaddrs. Channel wakers move to a
-   `(cpu_id, relid)` table.
-7. **SMP cmdline + ctest lane.** Add `smp=on cpus=N` cmdline
-   handling in `examples-kernel/src/main.rs`, a new
-   `limine-smp.conf`, and a `kernel-echo-e1000-smp` ctest lane that
-   boots the existing kernel ELF under `qemu -smp 4`.
+Captured AP heartbeat snapshot from the SMP lane:
 
-Phases 1–5 are mechanical and have no driver-facing API churn.
-Phase 6 only affects `embclox-hyperv`. Phase 7 wires up the new
-`limine-smp.conf` and ctest lane.
+```
+SMP CHECK: ap_counters=[0, 41, 39, 41, 0, 0, 0, 0]
+```
+
+(~40 ticks per AP over the 100 ms BSP sleep window matches the
+1 ms APIC timer period; BSP slot is 0 by design.)
+
+## What shipped
+
+Phases, in dependency order; each row is a commit on `dev`.
+
+| Phase | Commit | Summary |
+|-------|--------|---------|
+| Plan | `4f11ca7` | This doc. |
+| 1 | `fbe463a` | `CpuId::Ap(u8)` + `cpu_local` table + 6-test unit suite. |
+| 2 | `0b4bd17` | Limine `MpRequest` in the `limine_boot_requests!` macro. |
+| 3 | `12e5761` | `smp::bring_up_aps` + `ap_setup` + GS_BASE per-CPU + `idt::load_current_cpu`. |
+| 4 | `2a6f7bb` | Per-CPU `embassy-time` alarm slots in the global driver. |
+| 5 | `8dc0bb2` | `ProbeCtx::install_pci_isr_on(line, handler, cpu_id)`. |
+| 7 | `05859b7` | `smp=on cpus=N` cmdline + `kernel-echo-e1000-smp` ctest lane. |
+| 6 | `c2946dc` | Per-CPU SIEFP/SIMP slot table in the VMBus ISR. |
+
+Phases 1–5 were mechanical and had no driver-facing API churn.
+Phase 6 affects only `embclox-hyperv` (data-shape only; runtime
+behaviour unchanged). Phase 7 wired up the cmdline opt-in and the
+new ctest lane.
 
 ## Decisions
 
