@@ -8,7 +8,7 @@ use embclox_hal_x86::idt;
 use embclox_hal_x86::ioapic::IoApic;
 use embclox_hal_x86::memory::MemoryMapper;
 use embclox_hal_x86::pci::{PciBus, PciDevice};
-use embclox_hal_x86::vector_alloc::{InstalledIsr, VectorAllocator};
+use embclox_hal_x86::vector_alloc::{CpuId, InstalledIsr, VectorAllocator};
 use embclox_hyperv::{ChannelOffer, VmBus};
 use x86_64::structures::idt::InterruptStackFrame;
 
@@ -34,9 +34,12 @@ pub struct ProbeCtx<'a> {
 }
 
 impl ProbeCtx<'_> {
-    /// Install an INTx-line ISR for a PCI device. Allocates an IDT
-    /// vector, points the IDT entry at `handler`, and routes the
-    /// IOAPIC pin to that vector.
+    /// Install an INTx-line ISR for a PCI device on the BSP.
+    ///
+    /// Allocates an IDT vector, points the IDT entry at `handler`,
+    /// and routes the IOAPIC pin to that vector on the BSP. Same
+    /// shape as before SMP; AP-affine drivers use
+    /// [`install_pci_isr_on`](Self::install_pci_isr_on).
     ///
     /// `line` is the PCI interrupt line from config space offset 0x3C.
     pub fn install_pci_isr(
@@ -44,17 +47,36 @@ impl ProbeCtx<'_> {
         line: u8,
         handler: extern "x86-interrupt" fn(InterruptStackFrame),
     ) -> Result<InstalledIsr, ProbeError> {
+        self.install_pci_isr_on(line, handler, CpuId::Bsp)
+    }
+
+    /// Install an INTx-line ISR for a PCI device, routing the IRQ to
+    /// a specific CPU.
+    ///
+    /// Same as [`install_pci_isr`](Self::install_pci_isr) but the
+    /// IOAPIC redirection entry's destination field is set to
+    /// `cpu_id.apic_id()`, so the AP whose LAPIC has that ID will
+    /// see the interrupt instead of the BSP.
+    ///
+    /// The IDT vector itself is allocated from the same single pool
+    /// as `install_pci_isr` because the IDT is global across all
+    /// CPUs; CPU placement is purely an IOAPIC routing decision.
+    pub fn install_pci_isr_on(
+        &mut self,
+        line: u8,
+        handler: extern "x86-interrupt" fn(InterruptStackFrame),
+        cpu_id: CpuId,
+    ) -> Result<InstalledIsr, ProbeError> {
         if line == 0xFF {
             return Err(ProbeError::InvalidIrqLine(line));
         }
         if line as usize >= self.ioapic.max_entries() as usize {
             return Err(ProbeError::InvalidIrqLine(line));
         }
-        let isr = self.irq_alloc.allocate().ok_or(ProbeError::NoFreeVector)?;
-        unsafe { idt::set_handler(isr.vector, handler) };
-        self.ioapic
-            .enable_irq(line, isr.vector, isr.cpu_id.apic_id());
-        Ok(isr)
+        let vector = self.irq_alloc.allocate().ok_or(ProbeError::NoFreeVector)?;
+        unsafe { idt::set_handler(vector, handler) };
+        self.ioapic.enable_irq(line, vector, cpu_id.apic_id());
+        Ok(InstalledIsr { vector, cpu_id })
     }
 }
 

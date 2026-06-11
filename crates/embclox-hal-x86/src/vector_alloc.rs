@@ -5,11 +5,14 @@
 //! vectors (APIC timer = 32, spurious = 39, optional SynIC SINT2 = 34)
 //! can never be re-issued to a PCI driver.
 //!
-//! `InstalledIsr` is the receipt returned to drivers. It carries both
-//! the allocated `vector` and the `CpuId` it's pinned to. Today the
-//! single allocator runs on the BSP only; phase 5 of the SMP work
-//! makes the allocator per-CPU and the same struct will carry the
-//! real placement, with no driver-API change.
+//! One allocator covers the whole system: the IDT is shared across
+//! all CPUs, so vector 33 is the same IDT slot wherever it's
+//! delivered. Driver placement on a specific CPU is an IOAPIC routing
+//! decision; see [`crate::vector_alloc::CpuId`] and
+//! `embclox_driver::ProbeCtx::install_pci_isr_on`.
+//!
+//! `InstalledIsr` is the receipt callers receive: the allocated
+//! vector and the [`CpuId`] the IOAPIC entry was pointed at.
 //!
 //! See [docs/design/driver-model.md](../../../../docs/design/driver-model.md)
 //! sections "ISR registration" and "SMP-forward design choices §1",
@@ -93,17 +96,19 @@ impl VectorAllocator {
         alloc
     }
 
-    /// Allocate the next free vector. Returns `None` if the pool is
-    /// exhausted.
-    pub fn allocate(&mut self) -> Option<InstalledIsr> {
+    /// Allocate the next free IDT vector. Returns `None` if the pool
+    /// is exhausted.
+    ///
+    /// IDT vectors are a system-wide scarce resource (one shared IDT
+    /// across all CPUs); the allocator returns the bare `u8` and the
+    /// caller stamps the [`InstalledIsr`] with the target [`CpuId`]
+    /// it routed the IOAPIC entry to.
+    pub fn allocate(&mut self) -> Option<u8> {
         let span = (self.end - self.start + 1) as u32;
         for i in 0..span {
             if self.used & (1 << i) == 0 {
                 self.used |= 1 << i;
-                return Some(InstalledIsr {
-                    vector: self.start + i as u8,
-                    cpu_id: CpuId::Bsp,
-                });
+                return Some(self.start + i as u8);
             }
         }
         None
