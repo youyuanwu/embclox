@@ -106,6 +106,52 @@ pub fn parse_nic_filter(cmdline: &str) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
+/// SMP cmdline state derived from `smp=on` / `cpus=N` tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SmpConfig {
+    /// `true` when `smp=on` is present.
+    pub enabled: bool,
+    /// Upper bound on the number of APs to start. `None` means "all
+    /// reported by the bootloader". Set by `cpus=N` (N is total CPU
+    /// count including BSP, so AP cap = N - 1).
+    pub max_aps: Option<usize>,
+}
+
+impl SmpConfig {
+    pub const DISABLED: Self = Self {
+        enabled: false,
+        max_aps: None,
+    };
+}
+
+/// Parse `smp=on` and `cpus=N` tokens from a whitespace-separated
+/// cmdline. Unknown tokens and malformed values are ignored.
+///
+/// - `smp=on` → `enabled = true`
+/// - `cpus=N` (`N` an unsigned integer) → `max_aps = Some(N - 1)`
+///   (the BSP counts toward N, so the AP cap is N - 1; `cpus=1`
+///   yields `max_aps = Some(0)`, effectively disabling AP bring-up
+///   even with `smp=on`)
+/// - Both absent → [`SmpConfig::DISABLED`]
+pub fn parse_smp(cmdline: &str) -> SmpConfig {
+    let mut enabled = false;
+    let mut max_aps: Option<usize> = None;
+    for tok in cmdline.split_ascii_whitespace() {
+        if let Some(rest) = tok.strip_prefix("smp=") {
+            if rest.eq_ignore_ascii_case("on") {
+                enabled = true;
+            }
+        } else if let Some(rest) = tok.strip_prefix("cpus=") {
+            if let Ok(n) = rest.parse::<usize>() {
+                if n > 0 {
+                    max_aps = Some(n.saturating_sub(1));
+                }
+            }
+        }
+    }
+    SmpConfig { enabled, max_aps }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +235,43 @@ mod tests {
     #[test]
     fn nic_filter_empty_value_treated_as_absent() {
         assert_eq!(parse_nic_filter("nic="), None);
+    }
+
+    #[test]
+    fn smp_default_disabled() {
+        assert_eq!(parse_smp(""), SmpConfig::DISABLED);
+        assert_eq!(parse_smp("net=dhcp"), SmpConfig::DISABLED);
+    }
+
+    #[test]
+    fn smp_on_enables() {
+        let c = parse_smp("smp=on");
+        assert!(c.enabled);
+        assert_eq!(c.max_aps, None);
+    }
+
+    #[test]
+    fn smp_on_case_insensitive() {
+        assert!(parse_smp("smp=ON").enabled);
+        assert!(parse_smp("smp=On").enabled);
+    }
+
+    #[test]
+    fn smp_off_or_garbage_disabled() {
+        assert!(!parse_smp("smp=off").enabled);
+        assert!(!parse_smp("smp=garbage").enabled);
+    }
+
+    #[test]
+    fn cpus_n_sets_max_aps_to_n_minus_one() {
+        assert_eq!(parse_smp("smp=on cpus=4").max_aps, Some(3));
+        assert_eq!(parse_smp("smp=on cpus=1").max_aps, Some(0));
+        assert_eq!(parse_smp("smp=on cpus=8").max_aps, Some(7));
+    }
+
+    #[test]
+    fn cpus_zero_or_malformed_ignored() {
+        assert_eq!(parse_smp("smp=on cpus=0").max_aps, None);
+        assert_eq!(parse_smp("smp=on cpus=abc").max_aps, None);
     }
 }

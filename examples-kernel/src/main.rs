@@ -184,6 +184,28 @@ unsafe extern "C" fn kmain() -> ! {
         primary.name, primary.priority
     );
 
+    // --- Optional SMP AP bring-up --------------------------------------
+    //
+    // Gated by `smp=on` in the Limine cmdline. When absent, APs sit in
+    // Limine's spin loop and the kernel runs single-CPU as before.
+    let smp_cfg = embclox_hal_x86::cmdline::parse_smp(boot_info.cmdline);
+    if smp_cfg.enabled {
+        if let Some(mp) = limine_boot::mp_response() {
+            let max_aps = smp_cfg
+                .max_aps
+                .unwrap_or(embclox_hal_x86::cpu_local::MAX_CPUS - 1);
+            embclox_hal_x86::smp::set_ap_init_params(tsc_per_us, lapic_vaddr);
+            // Safety: ap_entry never returns, and we have populated the
+            // AP init params above (release-ordered).
+            let started = unsafe {
+                embclox_hal_x86::smp::bring_up_aps(mp, max_aps, ap_entry)
+            };
+            info!("smp: {} of {} requested AP(s) brought up", started, max_aps);
+        } else {
+            warn!("smp=on but Limine returned no MP response; running single-CPU");
+        }
+    }
+
     // --- Embassy stack -------------------------------------------------
 
     let net_mode = embclox_hal_x86::cmdline::parse_net_mode(boot_info.cmdline, NET_DEFAULTS);
@@ -229,6 +251,46 @@ unsafe extern "C" fn kmain() -> ! {
 
 // ---------- helpers + tasks --------------------------------------------
 
+/// Per-AP heartbeat counter. Bumped by `ap_entry`'s halt loop on
+/// every interrupt (APIC timer ticks at 1 ms). The test harness can
+/// grep for "AP N alive" log lines plus the final counter dump to
+/// verify each AP entered Rust and is responding to its APIC timer.
+static AP_COUNTERS: [core::sync::atomic::AtomicUsize;
+    embclox_hal_x86::cpu_local::MAX_CPUS] = [const {
+    core::sync::atomic::AtomicUsize::new(0)
+}; embclox_hal_x86::cpu_local::MAX_CPUS];
+
+/// AP entry thunk. Limine calls this with `&Cpu` after writing
+/// `cpu.goto_address`; we reconstruct `ApInit` from the per-CPU
+/// `extra` field + shared params and hand off to a simple
+/// halt-loop body so the BSP-side test harness can verify the AP
+/// is alive.
+unsafe extern "C" fn ap_entry(cpu: &embclox_hal_x86::limine_boot::limine::mp::Cpu) -> ! {
+    let init = embclox_hal_x86::smp::ap_init_from(cpu);
+    // Safety: AP context, called once per AP from Limine.
+    unsafe { embclox_hal_x86::smp::ap_setup(init) };
+
+    let processor_id = match init.cpu_id {
+        embclox_hal_x86::vector_alloc::CpuId::Bsp => unreachable!("ap_entry on BSP"),
+        embclox_hal_x86::vector_alloc::CpuId::Ap(n) => n,
+    };
+    info!(
+        "AP {} alive (apic_id={}, tsc/us={})",
+        processor_id, init.apic_id, init.tsc_per_us
+    );
+
+    // Mark this AP as having checked in, then halt-loop. The APIC
+    // timer (1 ms periodic, programmed by ap_setup) wakes us; each
+    // wake increments the counter so the BSP can observe progress.
+    AP_COUNTERS[processor_id as usize].store(1, core::sync::atomic::Ordering::Release);
+    x86_64::instructions::interrupts::enable();
+    loop {
+        x86_64::instructions::interrupts::enable_and_hlt();
+        AP_COUNTERS[processor_id as usize]
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 fn read_hv_tsc_freq() -> Option<u64> {
     // Only valid on Hyper-V; reading the MSR on bare metal will #GP.
     // Gate on the same detect that drives VMBus init.
@@ -264,6 +326,17 @@ async fn echo_task(stack: &'static Stack<'static>) {
     }
     // Marker for scripts/hyperv-boot-test.ps1.
     info!("PHASE4B ECHO READY: TCP port 1234");
+
+    // If any APs were brought up, give them a beat to tick a few times
+    // then dump their heartbeat counters so the SMP ctest lane can
+    // assert each AP is alive.
+    embassy_time::Timer::after_millis(100).await;
+    let mut counts: heapless::Vec<usize, { embclox_hal_x86::cpu_local::MAX_CPUS }> =
+        heapless::Vec::new();
+    for counter in AP_COUNTERS.iter() {
+        let _ = counts.push(counter.load(core::sync::atomic::Ordering::Relaxed));
+    }
+    info!("SMP CHECK: ap_counters={:?}", &counts[..]);
 
     let mut rx = [0u8; 1024];
     loop {

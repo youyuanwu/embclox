@@ -141,6 +141,18 @@ if [[ -n "$PROBE_PORT" ]]; then
 
     if [[ "$RESPONSE" == "$PROBE_STRING" ]]; then
         echo "=== PASS: TCP echo returned '$RESPONSE' ==="
+        # Optional follow-on log assertion (e.g. SMP heartbeat lines).
+        if [[ -n "$LOG_PATTERN" ]]; then
+            if grep -qE "$LOG_PATTERN" "$LOG"; then
+                echo "=== PASS: log matched '$LOG_PATTERN' ==="
+                exit 0
+            else
+                echo "=== FAIL: probe passed but log did not match '$LOG_PATTERN' ==="
+                echo "QEMU log:"
+                cat "$LOG"
+                exit 1
+            fi
+        fi
         exit 0
     else
         echo "=== FAIL: expected '$PROBE_STRING', got '$RESPONSE' ==="

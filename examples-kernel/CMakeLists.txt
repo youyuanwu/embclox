@@ -49,6 +49,49 @@ add_custom_command(
 )
 add_custom_target(kernel-image DEPENDS ${KERNEL_ISO})
 
+# --- ISO image (SMP variant for kernel-echo-e1000-smp ctest lane) ---
+#
+# Same kernel ELF as kernel.iso, different limine cmdline
+# (`smp=on cpus=4`). When QEMU boots this with `-smp 4`, the kernel
+# runs bring_up_aps after probe and the 3 APs run the ap_entry
+# halt-loop while BSP runs the embassy stack.
+
+set(KERNEL_SMP_ISO "${CMAKE_BINARY_DIR}/kernel-smp.iso")
+
+add_custom_command(
+    OUTPUT ${KERNEL_SMP_ISO}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/kernel-smp-iso/boot/limine
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/kernel-smp-iso/EFI/BOOT
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${CMAKE_SOURCE_DIR}/${KERNEL_KERNEL_REL}
+        ${CMAKE_BINARY_DIR}/kernel-smp-iso/boot/kernel
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${CMAKE_CURRENT_SOURCE_DIR}/limine-smp.conf
+        ${CMAKE_BINARY_DIR}/kernel-smp-iso/boot/limine/limine.conf
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${LIMINE_BOOTX64}
+        ${CMAKE_BINARY_DIR}/kernel-smp-iso/EFI/BOOT/BOOTX64.EFI
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${LIMINE_UEFI_CD}
+        ${CMAKE_BINARY_DIR}/kernel-smp-iso/boot/limine/limine-uefi-cd.bin
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${LIMINE_BIOS_CD}
+        ${CMAKE_BINARY_DIR}/kernel-smp-iso/boot/limine/limine-bios-cd.bin
+    COMMAND ${CMAKE_COMMAND} -E copy
+        ${LIMINE_BIOS_SYS}
+        ${CMAKE_BINARY_DIR}/kernel-smp-iso/boot/limine/limine-bios.sys
+    COMMAND xorriso -as mkisofs
+        -b boot/limine/limine-bios-cd.bin
+        -no-emul-boot -boot-load-size 4 -boot-info-table
+        --efi-boot boot/limine/limine-uefi-cd.bin
+        -efi-boot-part --efi-boot-image --protective-msdos-label
+        ${CMAKE_BINARY_DIR}/kernel-smp-iso -o ${KERNEL_SMP_ISO}
+        2>/dev/null
+    DEPENDS kernel-build ${LIMINE_BOOTX64} ${CMAKE_CURRENT_SOURCE_DIR}/limine-smp.conf
+    COMMENT "Creating kernel SMP ISO image (BIOS+UEFI)"
+)
+add_custom_target(kernel-smp-image DEPENDS ${KERNEL_SMP_ISO})
+
 # --- ISO image (local Hyper-V Gen1 with embclox-test vSwitch IPs) ---
 
 set(KERNEL_HYPERV_ISO "${CMAKE_BINARY_DIR}/kernel-hyperv.iso")
@@ -204,6 +247,24 @@ add_test(NAME kernel-echo-tulip
         --probe tcp:5555:hello-embclox
         --timeout 30
         --qemu-args "-netdev user,id=net0,hostfwd=tcp::5555-:1234 -device tulip,netdev=net0 -m 256M"
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+)
+
+# --- SMP smoke lane ---
+#
+# Boots kernel-smp.iso (limine-smp.conf -> smp=on cpus=4) under
+# `-smp 4`. Passes if: (a) e1000 echo still works (BSP is fine), AND
+# (b) the BSP-side "SMP CHECK: ap_counters=[0, n, n, n, ...]" line
+# reports positive heartbeat counts for APs 1-3 (slot 0 is BSP and
+# stays 0 because BSP doesn't run ap_entry).
+add_test(NAME kernel-echo-e1000-smp
+    COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/qemu-test.sh
+        ${KERNEL_SMP_ISO}
+        --iso
+        --probe tcp:5555:hello-embclox
+        --timeout 30
+        --log-match "SMP CHECK: ap_counters=\\[0, [1-9][0-9]*, [1-9][0-9]*, [1-9][0-9]*,"
+        --qemu-args "-smp 4 -netdev user,id=net0,hostfwd=tcp::5555-:1234 -device e1000,netdev=net0 -m 256M"
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
 )
 
