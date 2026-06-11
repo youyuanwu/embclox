@@ -2,29 +2,33 @@
 
 ## Status: shipped
 
-APs now boot via the Limine MP request and run their own ISR + APIC
-timer alongside the BSP. Tasks are pinned to the CPU that spawned
-them; there is no migration. IRQs are routed to a specific CPU at
-probe time and that CPU's executor sees the resulting wake.
+APs now boot via the Limine MP request, bring up their own ISR +
+APIC timer, and each runs its own embassy `Executor` alongside the
+BSP. Tasks are pinned to the CPU that spawned them; there is no
+migration. IRQs are routed to a specific CPU at probe time and that
+CPU's executor sees the resulting wake.
 
 This is the "Option A" path from the SMP architecture discussion:
 the lightest-weight way to use additional cores while keeping the
 existing driver shape intact.
 
-Shipped across 7 commits on `dev` plus this design doc; runtime is
+Shipped across 8 commits on `dev` plus this design doc; runtime is
 opt-in via the `smp=on` cmdline token (see
 [examples-kernel/limine-smp.conf](../../examples-kernel/limine-smp.conf)).
-The new `kernel-echo-e1000-smp` ctest lane exercises the path
-end-to-end under `qemu -smp 4`.
+The `kernel-echo-e1000-smp` ctest lane exercises the path
+end-to-end under `qemu -smp 4`: each AP runs `ap_heartbeat_task`
+on its own executor and the BSP asserts every AP's counter is
+non-zero before serving the echo socket.
 
 ## Goals and non-goals
 
 ### Goals
 
 - Boot APs via the Limine MP request; each AP enters Rust running
-  per-CPU ISR + APIC timer setup. (The example kernel today runs
-  APs in a halt-loop heartbeat; full per-CPU embassy executor
-  instantiation is a kernel-side concern, not a HAL one.)
+  per-CPU ISR + APIC timer setup, then drives its own embassy
+  `Executor`. (Instantiating the executor itself is a kernel-side
+  concern; the HAL provides the bring-up primitives and the
+  canonical `run_executor` poll/hlt loop.)
 - Per-CPU LAPIC handle is **not** needed (single global stash
   works for cross-CPU EOI; see [Per-CPU statics](#per-cpu-statics)).
   Per-CPU APIC timer drives `embassy-time` via per-CPU alarm slots.
@@ -151,9 +155,11 @@ The public API lives in
 
 `ap_entry` lives in the kernel binary (see
 [examples-kernel/src/main.rs](../../examples-kernel/src/main.rs)):
-a small thunk that calls `ap_init_from` + `ap_setup` and then
-enters its workload (today a halt-loop heartbeat that increments
-`AP_COUNTERS[processor_id]`).
+a small thunk that calls `ap_init_from` + `ap_setup`, initialises
+this AP's slot in the `AP_EXECUTORS: [StaticCell<Executor>;
+MAX_CPUS - 1]` table, spawns `ap_heartbeat_task(processor_id)`,
+and hands off to `runtime::run_executor`. Each AP then sits in the
+same canonical poll/hlt loop the BSP uses.
 
 ## Per-CPU statics
 
@@ -255,6 +261,12 @@ storing `&'static Executor` in a shared static requires an
 `unsafe impl Sync` wrapper for no benefit — the kernel owns each
 executor's `StaticCell` at the call site and never needs a global
 lookup table for it.
+
+The example kernel keeps two separate statics: a single
+`EXECUTOR: StaticCell<Executor>` for the BSP (running `net_task`
++ `echo_task`) and `AP_EXECUTORS: [StaticCell<Executor>; MAX_CPUS
+- 1]` indexed by `processor_id - 1` for the APs. Each AP's
+`ap_entry` initialises exactly its own slot.
 
 Spawning a task on a CPU still requires a `Spawner` for that CPU's
 executor. Cross-CPU spawn is intentionally awkward: the BSP can
@@ -435,11 +447,14 @@ Per the test harness shape
 3. **`kernel-echo-e1000-smp` ctest lane** in
    [examples-kernel/CMakeLists.txt](../../examples-kernel/CMakeLists.txt).
    Boots `build/kernel-smp.iso` (same ELF as `kernel.iso`, different
-   limine cmdline: `smp=on cpus=4`) under `qemu -smp 4`. Passes
-   when: (a) e1000 TCP echo still works on BSP, and (b) the
-   `SMP CHECK: ap_counters=[0, n, n, n, ...]` log line shows
-   positive heartbeat counters for APs 1–3 (slot 0 stays 0 because
-   BSP never runs `ap_entry`).
+   limine cmdline: `smp=on cpus=4`) under `qemu -smp 4`. Each AP
+   spawns `ap_heartbeat_task` on its own embassy executor; the
+   task ticks `AP_COUNTERS[processor_id]` on every 10 ms
+   `Timer::after_millis` expiry. The test passes when: (a) e1000
+   TCP echo still works on BSP, and (b) the `SMP CHECK:
+   ap_counters=[0, n, n, n, ...]` log line shows positive heartbeat
+   counters for APs 1–3 (slot 0 stays 0 because BSP never runs
+   `ap_entry`).
 4. **`cargo build --target x86_64-unknown-none` + `cargo clippy -D
    warnings`** clean on the workspace.
 
@@ -447,23 +462,28 @@ Hyper-V lanes were intentionally not modified: VMBus stays
 BSP-only at runtime, so existing `kernel-hyperv-netvsc` and
 `kernel-hyperv-tulip` paths are unchanged.
 
-Last verified run (commit `c2946dc`, 4 lanes, 100% pass):
+Last verified run (4 lanes, 100% pass, phase 8 shipped):
 
 ```
-kernel-echo-e1000      11.15s
+kernel-echo-e1000      11.14s
 kernel-echo-tulip      11.14s
-kernel-echo-e1000-smp  11.14s
-unit                    4.83s
+kernel-echo-e1000-smp  11.15s
+unit                    4.93s
 ```
 
 Captured AP heartbeat snapshot from the SMP lane:
 
 ```
-SMP CHECK: ap_counters=[0, 41, 39, 41, 0, 0, 0, 0]
+[INFO ] AP 2 alive (apic_id=2, tsc/us=2692)
+[INFO ] AP 3 alive (apic_id=3, tsc/us=2692)
+[INFO ] AP 1 alive (apic_id=1, tsc/us=2692)
+[INFO ] SMP CHECK: ap_counters=[0, 40, 43, 42, 0, 0, 0, 0]
 ```
 
-(~40 ticks per AP over the 100 ms BSP sleep window matches the
-1 ms APIC timer period; BSP slot is 0 by design.)
+The ~40 ticks per AP cover the AP's full lifetime from
+`ap_entry` start to the BSP sample point (boot finishing + the
+100 ms BSP sleep before the dump), at one tick per 10 ms
+`Timer::after_millis` cycle. The BSP slot is 0 by design.
 
 ## What shipped
 
@@ -479,11 +499,14 @@ Phases, in dependency order; each row is a commit on `dev`.
 | 5 | `8dc0bb2` | `ProbeCtx::install_pci_isr_on(line, handler, cpu_id)`. |
 | 7 | `05859b7` | `smp=on cpus=N` cmdline + `kernel-echo-e1000-smp` ctest lane. |
 | 6 | `c2946dc` | Per-CPU SIEFP/SIMP slot table in the VMBus ISR. |
+| 8 | _(this change)_ | APs run their own embassy executor + `ap_heartbeat_task` instead of a halt loop. |
 
 Phases 1–5 were mechanical and had no driver-facing API churn.
 Phase 6 affects only `embclox-hyperv` (data-shape only; runtime
 behaviour unchanged). Phase 7 wired up the cmdline opt-in and the
-new ctest lane.
+new ctest lane. Phase 8 swapped the AP body from a halt loop to a
+real per-CPU executor running an embassy task — the substrate is
+now in place for APs to do meaningful async work.
 
 ## Decisions
 

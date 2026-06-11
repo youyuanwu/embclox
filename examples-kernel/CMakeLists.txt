@@ -53,8 +53,9 @@ add_custom_target(kernel-image DEPENDS ${KERNEL_ISO})
 #
 # Same kernel ELF as kernel.iso, different limine cmdline
 # (`smp=on cpus=4`). When QEMU boots this with `-smp 4`, the kernel
-# runs bring_up_aps after probe and the 3 APs run the ap_entry
-# halt-loop while BSP runs the embassy stack.
+# runs bring_up_aps after probe and each AP brings up its own embassy
+# executor running `ap_heartbeat_task`, while the BSP runs the
+# net+echo stack.
 
 set(KERNEL_SMP_ISO "${CMAKE_BINARY_DIR}/kernel-smp.iso")
 
@@ -256,7 +257,9 @@ add_test(NAME kernel-echo-tulip
 # `-smp 4`. Passes if: (a) e1000 echo still works (BSP is fine), AND
 # (b) the BSP-side "SMP CHECK: ap_counters=[0, n, n, n, ...]" line
 # reports positive heartbeat counts for APs 1-3 (slot 0 is BSP and
-# stays 0 because BSP doesn't run ap_entry).
+# stays 0 because BSP doesn't run ap_entry). Each AP runs its own
+# embassy executor with `ap_heartbeat_task` ticking the counter on
+# every 10 ms `embassy_time::Timer` expiry.
 add_test(NAME kernel-echo-e1000-smp
     COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/qemu-test.sh
         ${KERNEL_SMP_ISO}

@@ -249,18 +249,43 @@ unsafe extern "C" fn kmain() -> ! {
 
 // ---------- helpers + tasks --------------------------------------------
 
-/// Per-AP heartbeat counter. Bumped by `ap_entry`'s halt loop on
-/// every interrupt (APIC timer ticks at 1 ms). The test harness can
-/// grep for "AP N alive" log lines plus the final counter dump to
-/// verify each AP entered Rust and is responding to its APIC timer.
+/// Per-AP heartbeat counter. Bumped by [`ap_heartbeat_task`] running
+/// inside each AP's embassy executor. The test harness greps for
+/// "AP N alive" log lines plus the final counter dump to verify each
+/// AP entered Rust, brought up its own executor, and is making
+/// timer-driven async progress.
 static AP_COUNTERS: [core::sync::atomic::AtomicUsize; embclox_hal_x86::cpu_local::MAX_CPUS] =
     [const { core::sync::atomic::AtomicUsize::new(0) }; embclox_hal_x86::cpu_local::MAX_CPUS];
 
+/// One embassy `Executor` per possible AP slot. Indexed by
+/// `processor_id - 1` (BSP has its own `EXECUTOR` static in `kmain`).
+/// Each AP's `ap_entry` calls `.init(...)` on its slot exactly once,
+/// then hands the resulting `&'static Executor` to `run_executor`.
+static AP_EXECUTORS: [StaticCell<embassy_executor::raw::Executor>;
+    embclox_hal_x86::cpu_local::MAX_CPUS - 1] =
+    [const { StaticCell::new() }; embclox_hal_x86::cpu_local::MAX_CPUS - 1];
+
+/// Per-AP heartbeat task. Wakes on every `Timer::after_millis(10)`
+/// expiry — i.e. driven by the AP's own APIC timer ISR + per-CPU
+/// `embassy-time` alarm slot — and bumps `AP_COUNTERS[processor_id]`.
+/// Over the BSP's 100 ms `SMP CHECK` window we expect ~10 ticks per
+/// AP; the ctest lane only checks for `> 0`.
+///
+/// `pool_size = 8` must be `>= MAX_CPUS` so every AP can spawn its
+/// own instance. The const assert below enforces it.
+#[embassy_executor::task(pool_size = 8)]
+async fn ap_heartbeat_task(processor_id: u8) {
+    const _: () = assert!(8 >= embclox_hal_x86::cpu_local::MAX_CPUS);
+    loop {
+        AP_COUNTERS[processor_id as usize].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        embassy_time::Timer::after_millis(10).await;
+    }
+}
+
 /// AP entry thunk. Limine calls this with `&Cpu` after writing
 /// `cpu.goto_address`; we reconstruct `ApInit` from the per-CPU
-/// `extra` field + shared params and hand off to a simple
-/// halt-loop body so the BSP-side test harness can verify the AP
-/// is alive.
+/// `extra` field + shared params, finish per-CPU setup, then bring
+/// up this AP's own embassy executor and spawn the heartbeat task.
 unsafe extern "C" fn ap_entry(cpu: &embclox_hal_x86::limine_boot::limine::mp::Cpu) -> ! {
     let init = embclox_hal_x86::smp::ap_init_from(cpu);
     // Safety: AP context, called once per AP from Limine.
@@ -275,15 +300,16 @@ unsafe extern "C" fn ap_entry(cpu: &embclox_hal_x86::limine_boot::limine::mp::Cp
         processor_id, init.apic_id, init.tsc_per_us
     );
 
-    // Mark this AP as having checked in, then halt-loop. The APIC
-    // timer (1 ms periodic, programmed by ap_setup) wakes us; each
-    // wake increments the counter so the BSP can observe progress.
-    AP_COUNTERS[processor_id as usize].store(1, core::sync::atomic::Ordering::Release);
-    x86_64::instructions::interrupts::enable();
-    loop {
-        x86_64::instructions::interrupts::enable_and_hlt();
-        AP_COUNTERS[processor_id as usize].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    }
+    // Bring up this AP's embassy executor and spawn the heartbeat
+    // task. After this, the AP runs the canonical poll/hlt loop
+    // exactly like the BSP — its APIC timer wakes it, embassy polls,
+    // the heartbeat task ticks its counter, repeat.
+    let executor = AP_EXECUTORS[(processor_id - 1) as usize]
+        .init(embassy_executor::raw::Executor::new(core::ptr::null_mut()));
+    executor
+        .spawner()
+        .spawn(ap_heartbeat_task(processor_id).expect("ap_heartbeat_task SpawnToken"));
+    embclox_hal_x86::runtime::run_executor(executor);
 }
 
 fn read_hv_tsc_freq() -> Option<u64> {
