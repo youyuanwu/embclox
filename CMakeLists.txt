@@ -58,6 +58,7 @@ add_custom_target(images
     DEPENDS
         unit-test-image
         kernel-image
+        kernel-smp-image
         kernel-hyperv-image
         kernel-hyperv-tulip-image
         kernel-vhd
