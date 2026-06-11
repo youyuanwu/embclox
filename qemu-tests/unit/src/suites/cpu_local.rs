@@ -32,9 +32,11 @@ mod tests {
         assert_eq!(second.apic_id, 0x42);
     }
 
-    /// `current_cpu_id()` returns BSP until phase 3 lands.
+    /// `current_cpu_id()` returns BSP after `init_bsp` runs (it
+    /// reads `GS_BASE`, which `init_bsp` writes to 0).
     #[test]
     fn current_is_bsp() {
+        cpu_local::init_bsp(0x42);
         assert_eq!(cpu_local::current_cpu_id(), CpuId::Bsp);
     }
 

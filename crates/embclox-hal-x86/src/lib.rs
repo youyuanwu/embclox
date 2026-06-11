@@ -17,6 +17,7 @@ pub mod pic;
 pub mod pit;
 pub mod runtime;
 pub mod serial;
+pub mod smp;
 pub mod time;
 pub mod vector_alloc;
 

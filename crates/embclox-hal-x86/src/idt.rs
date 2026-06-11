@@ -8,7 +8,7 @@ fn idt() -> &'static mut InterruptDescriptorTable {
     unsafe { &mut *core::ptr::addr_of_mut!(IDT) }
 }
 
-/// Initialize the IDT with default handlers and load it.
+/// Initialize the IDT with default handlers and load it on the BSP.
 pub fn init() {
     let idt = idt();
     for i in 32u8..48 {
@@ -16,6 +16,20 @@ pub fn init() {
     }
     idt.load();
     log::info!("IDT initialized");
+}
+
+/// Load the IDT register (`lidt`) on the calling CPU.
+///
+/// `init()` already does this on the BSP; APs call this from
+/// `smp::ap_setup` so they share the same global IDT image without
+/// re-initialising its slots.
+///
+/// # Safety
+/// The IDT static must already have been initialised by [`init`] on
+/// some CPU. Calling this before [`init`] leaves the calling CPU with
+/// an IDT full of zero descriptors.
+pub unsafe fn load_current_cpu() {
+    idt().load();
 }
 
 /// Register an interrupt handler for a specific vector (32-255).
