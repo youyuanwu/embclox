@@ -7,30 +7,40 @@
 //!
 //! `InstalledIsr` is the receipt returned to drivers. It carries both
 //! the allocated `vector` and the `CpuId` it's pinned to. Today the
-//! runtime is single-CPU and `cpu_id` is always `CpuId::BSP`; when SMP
-//! lands the allocator will become per-CPU and the same struct will
-//! carry the real placement, with no driver-API change.
+//! single allocator runs on the BSP only; phase 5 of the SMP work
+//! makes the allocator per-CPU and the same struct will carry the
+//! real placement, with no driver-API change.
 //!
 //! See [docs/design/driver-model.md](../../../../docs/design/driver-model.md)
-//! sections "ISR registration" and "SMP-forward design choices §1".
+//! sections "ISR registration" and "SMP-forward design choices §1",
+//! and [docs/design/smp-per-cpu-executors.md](../../../../docs/design/smp-per-cpu-executors.md).
 
-/// Logical CPU identity. Single-variant today; will gain `Ap(u32)` (or
-/// similar) when SMP work begins.
+/// Logical CPU identity.
+///
+/// `CpuId::Ap(n)` carries Limine's sequential `processor_id`
+/// (1..MAX_CPUS), not the LAPIC ID. The LAPIC ID lives in
+/// [`crate::cpu_local::CpuLocal::apic_id`] and is looked up via
+/// [`apic_id`](CpuId::apic_id).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CpuId {
-    /// The boot CPU. Its LAPIC ID is captured at runtime construction
-    /// time so callers route IOAPIC redirection entries correctly.
+    /// The boot CPU (Limine `processor_id == 0`).
     Bsp,
+    /// An application processor with sequential `processor_id`
+    /// (1..[`crate::cpu_local::MAX_CPUS`]).
+    Ap(u8),
 }
 
 impl CpuId {
-    /// LAPIC ID for IOAPIC routing. Hardwired to `0` today because the
-    /// only consumer (`IoApic::enable_irq`) treats `0` as "BSP" and we
-    /// have no AP support yet.
+    /// LAPIC ID for IOAPIC routing.
+    ///
+    /// Resolves via [`crate::cpu_local::by_id`]. Returns `0` (the BSP's
+    /// conventional ID) if the slot has not been populated yet — this
+    /// keeps the single-CPU pre-SMP code path working before
+    /// [`crate::cpu_local::init_bsp`] is called.
     pub fn apic_id(self) -> u8 {
-        match self {
-            CpuId::Bsp => 0,
-        }
+        crate::cpu_local::by_id(self)
+            .map(|c| c.apic_id)
+            .unwrap_or(0)
     }
 }
 

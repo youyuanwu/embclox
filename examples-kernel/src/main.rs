@@ -66,6 +66,7 @@ unsafe extern "C" fn kmain() -> ! {
         .vaddr();
     let mut lapic = LocalApic::new(lapic_vaddr);
     lapic.enable();
+    embclox_hal_x86::cpu_local::init_bsp(lapic.id());
 
     // TSC calibration: prefer Hyper-V TSC freq MSR on Hyper-V, fall back
     // to the PIT, fall back to 2.4 GHz if neither works.

@@ -5,6 +5,7 @@ extern crate alloc;
 
 pub mod apic;
 pub mod cmdline;
+pub mod cpu_local;
 pub mod critical_section_impl;
 pub mod heap;
 pub mod idt;

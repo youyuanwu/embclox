@@ -1,3 +1,4 @@
+pub mod cpu_local;
 pub mod e1000_driver;
 pub mod e1000_smoke;
 pub mod hal_memory;

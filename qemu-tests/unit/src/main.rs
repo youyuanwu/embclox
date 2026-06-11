@@ -27,6 +27,12 @@ unsafe extern "C" fn kmain() -> ! {
     let (name, tests) = suites::hal_pci::suite();
     total += harness::run_suite(name, tests);
 
+    // cpu_local: no init needed (the BSP slot is populated by the
+    // suite's own init_bsp call), and the suite must run before
+    // anything else that depends on the BSP being populated.
+    let (name, tests) = suites::cpu_local::suite();
+    total += harness::run_suite(name, tests);
+
     // hal_memory: init with a MemoryMapper, run before e1000 maps BAR0
     // (tests map/unmap cleanly, leaving pages free for later use)
     unsafe {

@@ -110,4 +110,11 @@ impl LocalApic {
     pub fn end_of_interrupt(&self) {
         self.write(APIC_EOI, 0);
     }
+
+    /// Read this CPU's LAPIC ID (xAPIC: bits 31:24 of the APIC_ID
+    /// register). x2APIC would use a 32-bit value here; we don't
+    /// support that yet so the truncation to `u8` is safe.
+    pub fn id(&self) -> u8 {
+        (self.read(APIC_ID) >> 24) as u8
+    }
 }
