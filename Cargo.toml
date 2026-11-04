@@ -49,18 +49,18 @@ embclox-e1000 = { path = "crates/embclox-e1000" }
 embclox-hal-x86 = { path = "crates/embclox-hal-x86" }
 embclox-test-macros = { path = "crates/embclox-test-macros" }
 x86_64 = "0.15"
-uart_16550 = "0.6"
+uart_16550 = "0.9"
 
 # Utilities
 log = "0.4"
 static_cell = "2"
 linked_list_allocator = "0.10"
 critical-section = { version = "1", features = ["restore-state-bool"] }
-spin = "0.10"
-syn = { version = "2", features = ["full"] }
+spin = "0.12"
+syn = { version = "3", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
-bindgen = "0.72"
+bindgen = "0.73"
 
 [profile.dev]
 panic = "abort"

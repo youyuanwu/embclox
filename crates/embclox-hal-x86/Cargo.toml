@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-limine = "0.5"
+limine = "0.6"
 x86_64.workspace = true
 uart_16550.workspace = true
 log.workspace = true
