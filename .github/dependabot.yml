@@ -1,0 +1,15 @@
+version: 2
+multi-ecosystem-groups:
+  all-updates:
+    schedule:
+      interval: weekly
+
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    patterns: ["*"]
+    multi-ecosystem-group: all-updates
+  - package-ecosystem: github-actions
+    directory: /
+    patterns: ["*"]
+    multi-ecosystem-group: all-updates
