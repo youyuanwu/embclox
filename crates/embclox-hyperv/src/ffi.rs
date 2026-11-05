@@ -14,7 +14,8 @@
     clippy::missing_safety_doc,
     clippy::fn_to_numeric_cast,
     clippy::ptr_offset_with_cast,
-    clippy::unnecessary_cast
+    clippy::unnecessary_cast,
+    clippy::manual_div_ceil
 )]
 
 include!(concat!(env!("OUT_DIR"), "/hyperv_bindings.rs"));
