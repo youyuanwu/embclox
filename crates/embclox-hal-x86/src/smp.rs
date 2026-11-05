@@ -3,9 +3,9 @@
 //! Phase 3 of [docs/design/smp-per-cpu-executors.md](../../../../docs/design/smp-per-cpu-executors.md).
 //!
 //! `bring_up_aps` walks the [`MpResponse`] CPU list, populates a
-//! [`CpuLocal`] slot for each AP, then writes its `goto_address`
-//! field to launch the AP into the kernel-supplied `on_ap_ready`
-//! callback. Limine guarantees that the `goto_address` store is
+//! [`CpuLocal`] slot for each AP, then calls its `bootstrap`
+//! method to launch the AP into the kernel-supplied `on_ap_ready`
+//! callback. Limine guarantees that the entry-point store is
 //! release-ordered relative to the AP's first instruction fetch, so
 //! the AP sees the populated slot.
 //!
@@ -16,8 +16,8 @@
 use crate::cpu_local::{self, MAX_CPUS};
 use crate::vector_alloc::CpuId;
 use core::sync::atomic::{AtomicU64, Ordering};
-use limine::mp::Cpu;
-use limine::response::MpResponse;
+use limine::mp::MpInfo;
+use limine::request::MpResponse;
 
 /// State an AP needs to finish its own boot, handed to the kernel's
 /// `on_ap_ready` callback.
@@ -35,7 +35,7 @@ pub struct ApInit {
 /// Shared parameter every AP needs (TSC freq).
 ///
 /// The BSP populates this with [`set_ap_init_params`] before calling
-/// [`bring_up_aps`]; each AP reads it from inside its `goto_address`
+/// [`bring_up_aps`]; each AP reads it from inside its entry-point
 /// thunk. The LAPIC MMIO VA is cached in [`crate::apic`] (via
 /// [`crate::apic::init`] on the BSP) and is the same on every CPU,
 /// so it doesn't need to be propagated through `ApInit`.
@@ -47,13 +47,13 @@ pub fn set_ap_init_params(tsc_per_us: u64) {
     AP_TSC_PER_US.store(tsc_per_us, Ordering::Release);
 }
 
-/// Reconstruct an [`ApInit`] from inside an AP `goto_address` thunk.
+/// Reconstruct an [`ApInit`] from inside an AP entry-point thunk.
 ///
-/// `cpu.extra` carries the `processor_id` written by [`bring_up_aps`];
+/// `cpu.extra_argument()` carries the `processor_id` written by [`bring_up_aps`];
 /// the shared TSC comes from the static populated by
 /// [`set_ap_init_params`].
-pub fn ap_init_from(cpu: &Cpu) -> ApInit {
-    let processor_id = cpu.extra.load(Ordering::Acquire) as u8;
+pub fn ap_init_from(cpu: &MpInfo) -> ApInit {
+    let processor_id = cpu.extra_argument() as u8;
     ApInit {
         cpu_id: CpuId::Ap(processor_id),
         apic_id: cpu.lapic_id as u8,
@@ -62,11 +62,11 @@ pub fn ap_init_from(cpu: &Cpu) -> ApInit {
 }
 
 /// Kernel-supplied AP entry point. Wraps the AP body so the
-/// `goto_address` thunk only has to call `ap_setup` + this. The
+/// entry-point thunk only has to call `ap_setup` + this. The
 /// kernel writes a thunk like:
 ///
 /// ```ignore
-/// unsafe extern "C" fn ap_entry(cpu: &limine::mp::Cpu) -> ! {
+/// unsafe extern "C" fn ap_entry(cpu: &limine::mp::MpInfo) -> ! {
 ///     let init = embclox_hal_x86::smp::ap_init_from(cpu);
 ///     unsafe { embclox_hal_x86::smp::ap_setup(init) };
 ///     my_kernel_on_ap_ready(init)
@@ -77,8 +77,8 @@ pub type ApReady = fn(ApInit) -> !;
 /// Bring up every AP reported by the bootloader, up to `max_aps`
 /// (capped at [`MAX_CPUS`] - 1; one slot is reserved for the BSP).
 ///
-/// Each AP's `goto_address` is written to `thunk`, which Limine
-/// invokes with a `&Cpu` pointer. `thunk` must extract the per-AP
+/// Each AP's `bootstrap` is called with `thunk`, which Limine
+/// invokes with a `&MpInfo` pointer. `thunk` must extract the per-AP
 /// `ApInit` from somewhere (typically a side table indexed by
 /// `cpu.lapic_id`) and call the kernel's [`ApReady`] callback.
 ///
@@ -87,20 +87,20 @@ pub type ApReady = fn(ApInit) -> !;
 /// values it already computed during BSP setup.
 ///
 /// Returns the number of APs successfully started (i.e. for which
-/// `goto_address` was written). APs whose slot is full or whose
+/// `bootstrap` was called). APs whose slot is full or whose
 /// `lapic_id` equals the BSP's are skipped.
 ///
 /// # Safety
 /// - `thunk` must not return.
-/// - Writing `goto_address` causes the AP to start executing
+/// - Calling `bootstrap` causes the AP to start executing
 ///   `thunk` immediately; the kernel must have finished any
-///   per-AP state population *before* the write.
+///   per-AP state population *before* the call.
 pub unsafe fn bring_up_aps(
     mp: &'static MpResponse,
     max_aps: usize,
-    thunk: unsafe extern "C" fn(&Cpu) -> !,
+    thunk: unsafe extern "C" fn(&MpInfo) -> !,
 ) -> usize {
-    let bsp_lapic_id = mp.bsp_lapic_id();
+    let bsp_lapic_id = mp.bsp_lapic_id;
     let cap = max_aps.min(MAX_CPUS - 1);
     let mut started = 0usize;
 
@@ -118,18 +118,15 @@ pub unsafe fn bring_up_aps(
         // ... in order encountered.
         let processor_id = (started + 1) as u8;
 
-        // Hand the AP the processor_id via `extra`. The thunk reads
-        // it back and feeds it into ap_setup, which populates the
+        // Hand the AP the processor_id via `extra_argument`. The thunk
+        // reads it back and feeds it into ap_setup, which populates the
         // CpuLocal slot on the AP itself (cpu_local::init_ap also
         // writes that AP's GS_BASE).
-        cpu.extra
-            .store(processor_id as u64, core::sync::atomic::Ordering::Release);
-
         // Release the AP. From here on the AP is running concurrently;
-        // Limine guarantees the goto_address write is release-ordered
+        // Limine guarantees the entry-point write is release-ordered
         // relative to the AP's first instruction fetch, so the AP sees
-        // the extra value above.
-        cpu.goto_address.write(thunk);
+        // the extra argument.
+        cpu.bootstrap(thunk, processor_id as u64);
 
         log::info!(
             "smp: started AP processor_id={} (lapic_id={}, idx={})",
@@ -186,10 +183,10 @@ pub unsafe fn ap_setup(init: ApInit) {
     );
 }
 
-/// Convenience: BSP-side read of `mp_response.bsp_lapic_id()` with
+/// Convenience: BSP-side read of `mp_response.bsp_lapic_id` with
 /// the truncation to `u8` xAPIC drivers expect.
 pub fn bsp_lapic_id(mp: &MpResponse) -> u8 {
-    mp.bsp_lapic_id() as u8
+    mp.bsp_lapic_id as u8
 }
 
 /// AP sanity-check: assert this AP's TSC is within `1 ms` of the BSP

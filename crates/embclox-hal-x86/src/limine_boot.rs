@@ -71,7 +71,7 @@ pub struct LimineBootInfo<'a> {
 /// - `HhdmRequest` — physical memory mapping offset
 /// - `ExecutableAddressRequest` — kernel virt/phys base for offset compute
 /// - `ExecutableCmdlineRequest` — kernel command line
-/// - `MemoryMapRequest` — physical memory map (re-exported for callers)
+/// - `MemmapRequest` — physical memory map (re-exported for callers)
 /// - `FramebufferRequest` — graphics framebuffer (re-exported for callers)
 /// - `StackSizeRequest` — request 64 KiB stack (matches existing examples)
 /// - `MpRequest` — application-processor bring-up. The response
@@ -85,10 +85,11 @@ macro_rules! limine_boot_requests {
         mod $mod_name {
             use $crate::limine_boot::limine::request::{
                 ExecutableAddressRequest, ExecutableCmdlineRequest, FramebufferRequest,
-                HhdmRequest, MemoryMapRequest, MpRequest, RequestsEndMarker, RequestsStartMarker,
-                StackSizeRequest,
+                HhdmRequest, MemmapRequest, MpRequest, StackSizeRequest,
             };
-            use $crate::limine_boot::limine::BaseRevision;
+            use $crate::limine_boot::limine::{
+                BaseRevision, RequestsEndMarker, RequestsStartMarker,
+            };
 
             #[used]
             #[unsafe(link_section = ".requests_start_marker")]
@@ -116,7 +117,7 @@ macro_rules! limine_boot_requests {
 
             #[used]
             #[unsafe(link_section = ".requests")]
-            pub static MEMMAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
+            pub static MEMMAP_REQUEST: MemmapRequest = MemmapRequest::new();
 
             #[used]
             #[unsafe(link_section = ".requests")]
@@ -125,11 +126,11 @@ macro_rules! limine_boot_requests {
             #[used]
             #[unsafe(link_section = ".requests")]
             static STACK_SIZE_REQUEST: StackSizeRequest =
-                StackSizeRequest::new().with_size(64 * 1024);
+                StackSizeRequest::new(64 * 1024);
 
             #[used]
             #[unsafe(link_section = ".requests")]
-            pub static MP_REQUEST: MpRequest = MpRequest::new();
+            pub static MP_REQUEST: MpRequest = MpRequest::new(0);
 
             /// Read the Limine MP response, if the bootloader provided
             /// one. Returns `None` on firmware that doesn't honour the
@@ -139,8 +140,8 @@ macro_rules! limine_boot_requests {
             /// Until then the response is unused; APs stay in Limine's
             /// spin loop.
             pub fn mp_response(
-            ) -> Option<&'static $crate::limine_boot::limine::response::MpResponse> {
-                MP_REQUEST.get_response()
+            ) -> Option<&'static $crate::limine_boot::limine::request::MpResponse> {
+                MP_REQUEST.response()
             }
 
             /// Read the Limine responses and build a [`LimineBootInfo`].
@@ -155,18 +156,18 @@ macro_rules! limine_boot_requests {
                 );
 
                 let hhdm_offset = HHDM_REQUEST
-                    .get_response()
-                    .map(|r| r.offset())
+                    .response()
+                    .map(|r| r.offset)
                     .expect("Limine HhdmRequest response missing");
 
                 let kernel_offset = KERNEL_ADDR_REQUEST
-                    .get_response()
-                    .map(|r| r.virtual_base() - r.physical_base())
+                    .response()
+                    .map(|r| r.virtual_base - r.physical_base)
                     .expect("Limine ExecutableAddressRequest response missing");
 
                 let cmdline = CMDLINE_REQUEST
-                    .get_response()
-                    .and_then(|r| r.cmdline().to_str().ok())
+                    .response()
+                    .map(|r| r.cmdline())
                     .unwrap_or("");
 
                 $crate::limine_boot::LimineBootInfo {

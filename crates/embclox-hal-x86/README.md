@@ -43,7 +43,7 @@ unsafe extern "C" fn kmain() -> ! {
 
 `limine_boot_requests!(<mod_name>)` declares the standard Limine request
 statics (`HhdmRequest`, `ExecutableAddressRequest`, `ExecutableCmdlineRequest`,
-`MemoryMapRequest`, `FramebufferRequest`, `StackSizeRequest`) inside a
+`MemmapRequest`, `FramebufferRequest`, `StackSizeRequest`) inside a
 private module in the calling crate. The generated `<mod_name>::collect()`
 function reads the responses and returns a `LimineBootInfo` carrying the
 HHDM offset, kernel virt/phys offset, and command-line string.

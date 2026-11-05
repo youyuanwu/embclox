@@ -55,11 +55,13 @@ async fn ap_heartbeat_task(processor_id: u8) {
     }
 }
 
-/// AP entry thunk. Limine calls this with `&Cpu` after writing
-/// `cpu.goto_address`; we reconstruct `ApInit` from the per-CPU
-/// `extra` field + shared params, finish per-CPU setup, then bring
+/// AP entry thunk. Limine calls this with `&MpInfo` after calling
+/// `cpu.bootstrap`; we reconstruct `ApInit` from the per-CPU
+/// `extra_argument` + shared params, finish per-CPU setup, then bring
 /// up this AP's own embassy executor and spawn the heartbeat task.
-pub(crate) unsafe extern "C" fn ap_entry(cpu: &embclox_hal_x86::limine_boot::limine::mp::Cpu) -> ! {
+pub(crate) unsafe extern "C" fn ap_entry(
+    cpu: &embclox_hal_x86::limine_boot::limine::mp::MpInfo,
+) -> ! {
     let init = embclox_hal_x86::smp::ap_init_from(cpu);
     // Safety: AP context, called once per AP from Limine.
     unsafe { embclox_hal_x86::smp::ap_setup(init) };
