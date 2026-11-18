@@ -60,7 +60,9 @@ spin = "0.12"
 syn = { version = "3", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
-bindgen = "0.73"
+# Bindgen uses rustfmt by default. Its optional prettyplease feature requires
+# both crates to resolve to the same syn version.
+bindgen = { version = "0.73", default-features = false, features = ["logging", "runtime"] }
 
 [profile.dev]
 panic = "abort"
